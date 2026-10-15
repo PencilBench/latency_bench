@@ -31,6 +31,7 @@ clip recorder（`F9+F10` 热键录制、`ffmpeg -c copy` 封装，commit `f6db91
   - `is_hw_owned=True` → 解码帧留在设备上，**不回读 CPU**。
   - `allow_software_fallback=False` → 强制硬件，失败即报错，**不支持软解**。
   - 断言 `stream.codec_context.is_hwaccel()` 为真，防止静默退化为软解。
+- **硬件加速路径**：Windows 固定用 `d3d11va`，macOS 固定用 `videotoolbox`；**不使用 QSV**（见 §3.3）。
 - **解码节奏**：尽快解码，不做实时 30fps 节流；每 33ms 把这一窗口的延迟统计写入文件。
 - **输出**：逐帧 CSV + 每 33ms 一行的时间窗统计 CSV + 汇总 JSON。
 - **仓库布局**：仓库根在子目录 `F:\AV1H265\latency_bench\`（`git init` 于此），源码用 `src\latency_bench\`
@@ -49,28 +50,34 @@ clip recorder（`F9+F10` 热键录制、`ffmpeg -c copy` 封装，commit `f6db91
 - PyAV **没有** `CodecContext.send_packet()` / `receive_frame()`，只有 `decode()` / `parse()` /
   `flush_buffers()`，因此计时粒度为「每 packet 一次 `Packet.decode()`」。
 
-### 3.2 PyAV wheel 内置 FFmpeg 的硬件加速可用性
+### 3.2 PyAV wheel 内置 FFmpeg 的硬件加速可用性（Windows 实测）
 
-PyAV 官方示例 `examples/basics/hw_decode.py` 的说明：
+在 Windows + PyAV 19.0.1（wheel `av-19.0.1-cp312-abi3-win_amd64`，FFmpeg libavcodec 63.1.102）实测：
 
-- Windows：`d3d11va` “available with built-in ffmpeg in PyAV binary wheels”，覆盖全部解码器；
-  `qsv` “requires custom ffmpeg built with those libraries”（wheel 里没有）。
-- macOS：`videotoolbox` “available with built-in ffmpeg in PyAV binary wheels”，且是 macOS 上的唯一选项。
+```
+hwdevices_available() -> ['cuda', 'dxva2', 'qsv', 'd3d11va', 'd3d12va', 'amf']
+```
 
-→ Windows 主路径 = `d3d11va`；QSV 需要自建 `--enable-libvpl` 的 FFmpeg 并源码编译 PyAV，属可选路径。
+即该 wheel 的 FFmpeg **同时**编译进了 `d3d11va`、`d3d12va`、`dxva2`、`qsv`、`cuda`、`amf`。
+（注意：PyAV 官方示例 `examples/basics/hw_decode.py` 仍写着 “qsv … requires custom ffmpeg built with
+those libraries”，该注释相对 19.0.1 的 Windows wheel **已经过时**。“设备类型被列出”与“解码器可用”
+是两件事，不能互相推断。）macOS 侧 wheel 提供 `videotoolbox`；Windows 上不出现该设备类型，属正常。
 
-### 3.3 为什么 Windows 主路径是 D3D11VA 而不是 QSV
+→ **本项目只用 `d3d11va`（Windows）/ `videotoolbox`（macOS）**，其余设备类型即便被列出也不使用，
+理由见 §3.3。
 
-**结论：对延迟而言，默认配置下 QSV 更慢；且 QSV 在 FFmpeg/PyAV 中的使用方式与 D3D11VA 本质不同。**
+### 3.3 为什么 Windows 只用 D3D11VA（不使用 QSV）
 
-1. **QSV 解码不是 hwaccel，而是独立解码器族。** `doc/ffmpeg.texi` 的 `-hwaccel qsv` 条目原文：
-   *"Unlike most other values, this option does not enable accelerated decoding (that is used
-   automatically whenever a qsv decoder is selected)"*。源码中搜不到 `HWACCEL_QSV` / `ff_qsv_hwaccel`
-   （0 命中）；FFmpeg wiki `HWAccelIntro` 的 API 状态表中 `libmfx`（QSV 前身）的 **Internal（作为内部
-   hwaccel 挂在原生解码器上）一列为 `-`（不适用）**，而 `Direct3D 11` 为 `Y`。
-   → `d3d11va` 是挂在**原生 `hevc`/`av1` 解码器**上的 hwaccel；QSV 是**另一套解码器**
-   （`hevc_qsv`、`av1_qsv`）。
-2. **QSV 解码器自带 4 帧深内部流水线，直接抬高延迟。** `libavcodec/qsvdec.c` + `qsv_internal.h`：
+**结论：Windows 侧固定使用 `d3d11va`（原生 `hevc`/`av1` 解码器 + `AV_HWDEVICE_TYPE_D3D11VA`），
+不使用 QSV。** 两条理由：
+
+1. **QSV 解码在 FFmpeg 里不是 hwaccel，而是另一套解码器，且自带抬高延迟的流水线。**
+   `doc/ffmpeg.texi` 的 `-hwaccel qsv` 条目原文：*"Unlike most other values, this option does not enable
+   accelerated decoding (that is used automatically whenever a qsv decoder is selected)"*；源码中搜不到
+   `HWACCEL_QSV` / `ff_qsv_hwaccel`（0 命中）；FFmpeg wiki `HWAccelIntro` 的 API 状态表中 `libmfx`
+   （QSV 前身）作为**内部 hwaccel 一列为 `-`（不适用）**，而 `Direct3D 11` 为 `Y`。
+   即 `d3d11va` 挂在**原生解码器**上，QSV 则必须用独立的 `hevc_qsv` / `av1_qsv`。
+   而 `libavcodec/qsvdec.c` + `qsv_internal.h` 显示 QSV 解码器默认开 4 帧深内部流水线：
    ```c
    #define ASYNC_DEPTH_DEFAULT 4       // internal parallelism
    { "async_depth", "Internal parallelization depth, the higher the value the higher the latency.",
@@ -80,17 +87,19 @@ PyAV 官方示例 `examples/basics/hw_decode.py` 的说明：
    ```
    FFmpeg 自己的选项帮助文本就写明“值越高延迟越高”；默认 4 意味着帧要等队列攒到 4 个才被取出
    （量级为 3 个帧间隔，60fps 下约 50ms）。原生解码器 + `d3d11va` 没有这条 FFmpeg 侧队列。
-3. **PyAV 很难驱动 QSV。** PyAV 的 `av.open(..., hwaccel=...)` 按 **codec id** 选解码器（→ 原生 `hevc`），
-   而原生解码器没有 QSV hw config，QSV 大概率不会真正生效；要用 QSV 必须按名字手工构造独立解码器
-   （`av.codec.Codec("hevc_qsv", "r")`）并自备 `hw_frames_ctx`，已超出 PyAV 高层 API 范围。
+2. **这是 Moonlight 在同一硬件上的实际做法。** 见 §3.4：moonlight-qt 从不为 Intel 核显启用 QSV，
+   源码里明确注释 `case AV_HWDEVICE_TYPE_QSV: // Covered by VAAPI and D3D11VA/DXVA2`。
+   本工具的目的是模拟真实串流路径，因此与 Moonlight 保持一致。
 
-→ 主路径定为 `d3d11va`（可选 `d3d12va` 横向对比）。QSV 作为一次**非阻塞可行性 spike**：
-跑得通则顺带测 `async_depth=4`（默认）与 `async_depth=1` 两组，量化内部流水线深度的延迟代价；
-跑不通则记 `qsv: unsupported_by_pyav` 并正常交付。
+> **决策记录（主动排除，非能力缺失）**：`hwdevices_available()` 在 Windows 上确实会返回 `qsv`（见 §3.2），
+> 但本项目主动排除它，属设计取舍。同理也不使用 `d3d12va` / `dxva2` / `cuda` / `amf`——即便它们可用，
+> 也不是 Moonlight 在 Intel 核显上的真实路径。若将来要重开 QSV 对比，需额外解决“按名字构造
+> `hevc_qsv` / `av1_qsv` 独立解码器”的问题，并同时记录 `async_depth=1` 与默认 4 两组结果。
 
-> **证据性质**：以上均为**源码与官方文档级**结论（FFmpeg 主分支源码 + FFmpeg wiki 的 API 状态表），
-> 属与硬件世代无关的确定性事实。本项目**未引用第三方实测帧率对比**——那类数据多为**吞吐**指标，
-> 不能外推为延迟。Xe3 / Apple Silicon 上的最终数字以本工具实测为准（见 §9）。
+> **证据性质**：§3.2 为**本机实测**（Windows + PyAV 19.0.1）；§3.1 / §3.3 / §3.4 为**源码与官方文档级**
+> 结论（FFmpeg 主分支源码、moonlight-qt 源码、FFmpeg wiki 的 API 状态表），属与硬件世代无关的确定性
+> 事实。本项目**未引用第三方实测帧率对比**——那类数据多为**吞吐**指标，不能外推为延迟。
+> Xe3 / Apple Silicon 上的最终数字以本工具实测为准（见 §9）。
 
 ### 3.4 Moonlight 客户端的真实解码路径（按 moonlight-qt 源码核实）
 
@@ -156,7 +165,7 @@ F:\AV1H265\                        <- 工作目录（不是仓库）
    │  ├─ __init__.py
    │  ├─ __main__.py               <- python -m latency_bench
    │  ├─ cli.py                    <- 参数解析、批处理编排、汇总输出
-   │  ├─ accel.py                  <- hwaccel 探测 / 候选基准 / 自动选择
+   │  ├─ accel.py                  <- 平台映射 + 可用性校验 + 硬解断言
    │  ├─ bench.py                  <- 解码循环 + 逐 packet 计时
    │  ├─ reporting.py              <- 33ms ticker、CSV/JSON 写出
    │  ├─ stats.py                  <- 分位数 / 抖动 / 实时倍率
@@ -186,9 +195,9 @@ t1   = perf_counter_ns()
 - 每解出一帧写一行 `frames.csv`，并用 `frame.pts` 记录 PTS。
 - 结尾 `flush_buffers()` / `decode(None)` 排空流水线，尾部帧单独标记。
 - **不做软解**：`allow_software_fallback=False`，并断言 `stream.codec_context.is_hwaccel()` 为真，否则直接失败。
-- **不回读校验**：检查 `frame.format.name` 是否为硬件格式（`d3d11` / `videotoolbox*` / `qsv`）；
-  若出现 `yuv420p` / `nv12` 等软件格式，说明发生了隐式回读 → 在 summary 中标记
-  `readback_detected=true` 并报警。
+- **不回读校验**：检查 `frame.format.name` 是否为硬件格式（本项目即 `d3d11`（Windows）/
+  `videotoolbox*`（macOS））；若出现 `yuv420p` / `nv12` 等软件格式，说明发生了隐式回读 →
+  在 summary 中标记 `readback_detected=true` 并报警。
 - 线程：`thread_count=1`、`thread_type=NONE`（避免 FFmpeg 帧级多线程额外引入延迟）。
 
 ### 33ms 输出
@@ -208,29 +217,30 @@ t1   = perf_counter_ns()
 - `<clip>__<hwaccel>.ticks.csv` — 每 33ms 一行
 - `<clip>__<hwaccel>.summary.json` — 总数/均值/中位/p95/p99/max/标准差/抖动/吞吐 fps/实时倍率/
   hw 像素格式/是否回读/环境信息
-- `summary.json` — 全部片段汇总 + 各候选 hwaccel 的短基准结果与最终选择
+- `summary.json` — 全部片段汇总 + 实际使用的 hwaccel 与设备/环境信息
 - `summary.md` — 便于贴入 issue/文档的对比表
 
-## 6. 硬件加速选择逻辑
+## 6. 硬件加速选择
 
-1. `hwdevices_available()` 取当前 PyAV 内置 FFmpeg 支持的设备类型。
-2. 按平台生成候选（顺序即优先级）：
-   - Windows：`["d3d11va", "d3d12va"]`（`d3d12va` 可选，若可用则一并短基准）
-   - macOS：`["videotoolbox"]`
-3. 候选 ≥2 时，用最短片段的前 ~150 帧做短基准比较 fps，选最快者跑正式测量；各候选结果都记入
-   `summary.json`。
-4. **QSV**：先做一次 spike 判定 `HWAccel("qsv")` 是否能让 `is_hwaccel()` 为真：
-   - 为真 → 纳入候选，并同时记录 `async_depth=4`（默认）与 `async_depth=1` 两组结果。
-   - 为假（预期结果，见 §3.3）→ 记 `qsv: unsupported_by_pyav`，不改用其它路径，正常继续。
-   - 无论结果如何，`--hwaccel qsv` 都必须可手工指定，不可用时清晰报错。
-5. 候选全不可用 → 明确报错退出（**不回退软解**）。
-6. `--hwaccel {auto,d3d11va,d3d12va,qsv,videotoolbox}` 可手工强制。
+平台映射固定，**不做候选探测择优**：
+
+| 平台 | hwaccel |
+|---|---|
+| Windows | `d3d11va` |
+| macOS | `videotoolbox` |
+
+1. 启动时用 `hwdevices_available()` 校验目标设备类型存在；缺失即报错退出。
+2. 解码过程中断言 `stream.codec_context.is_hwaccel()` 为真，否则报错退出（**不回退软解**）。
+3. 不使用 QSV（见 §3.3），也不使用 `d3d12va` / `dxva2` / `cuda` / `amf`——即使它们出现在
+   `hwdevices_available()` 里。
+4. `--hwaccel` 默认取平台默认值；允许传入的**只有本平台的那一个值**，传入其它值（含 `qsv`）直接报错，
+   以免误用未经本方案验证的路径。
 
 ### CLI 参数
 
 - `--clips`（默认 `..\clips`，即仓库上层的素材目录）、`--pattern`（默认 `*.mp4`）、
-  `--out`（默认 `results\<时间戳>`）、`--hwaccel`（默认 `auto`）、`--repeat`、`--warmup`、
-  `--tick-ms`（默认 `33`）、`--fsync`、`--json`
+  `--out`（默认 `results\<时间戳>`）、`--hwaccel`（默认平台默认值：Windows `d3d11va` /
+  macOS `videotoolbox`）、`--repeat`、`--warmup`、`--tick-ms`（默认 `33`）、`--fsync`、`--json`
 
 ## 7. 实施步骤
 
@@ -239,11 +249,11 @@ t1   = perf_counter_ns()
 2. **环境**：装 Python 3.13（优先 `winget install -e --id Python.Python.3.13 --scope user`；失败则用
    `curl` 从 python.org 下载最新 3.13.x amd64 安装包并 `/quiet InstallAllUsers=0 PrependPath=1`），
    在仓库根建 `.venv`（即 `F:\AV1H265\latency_bench\.venv`），`pip install av==19.*` + `pip install -e .`。
-3. **能力 spike（先做）**：打印 `hwdevices_available()`、`HWAccel(..., is_hw_owned=True)` 是否被接受、
-   `is_hwaccel()` 是否为真、`frame.format.name` 是硬格式还是软格式、`av.library_versions`。
-   结论落实到 `accel.py` 的实现方式。
+3. **能力确认**：打印 `hwdevices_available()`、确认 `HWAccel(..., is_hw_owned=True)` 可用、
+   `is_hwaccel()` 为真、`frame.format.name` 是硬格式（而非 `yuv420p`/`nv12` 等软格式）、
+   `av.library_versions`。结论落实到 `accel.py` 的实现方式。
 4. `inventory.py`：清点 4 个片段（codec/分辨率/帧率/时长/码率）→ `inventory.json`。
-5. `accel.py`：探测 + 候选短基准 + 自动选择 + 硬解断言。
+5. `accel.py`：平台映射 + 设备类型可用性校验 + 硬解断言。
 6. `bench.py`：解码循环与逐 packet 计时（demux 与 decode 分开）。
 7. `reporting.py` + `stats.py`：33ms ticker、逐帧/按 tick CSV、汇总 JSON、回读检测。
 8. `cli.py`：批处理全部片段 + 汇总表。
@@ -251,16 +261,15 @@ t1   = perf_counter_ns()
 10. `report.py` / `summary.md`：结果渲染为对比表（AV1 vs H265 × 4K vs 1080p × 31/127Mbps × 平台）。
 11. `scripts/setup_windows.ps1` 与 `scripts/setup_macos.sh`（macOS：`brew install python@3.13`）。
 12. **本机验证**：4 个片段全跑通；确认硬解生效、无回读、CSV/JSON 完整、tick 数量 ≈ 解码墙钟 / 33ms、
-    `--hwaccel qsv` 干净失败并给出清晰提示。
+    传入非法的 `--hwaccel`（如 `qsv`）能干净失败并给出清晰提示。
 13. 文档：根 `README.md`（快速开始 / 平台矩阵 / 方法学与局限）+ `latency_bench/README.md`。
 
 ## 8. 风险与已知局限
 
-- **QSV 在 Windows 上不是可行主路径**，两条独立原因（见 §3.3）：PyAV wheel 的 FFmpeg 未启用 `qsv`；
-  即使自建编译，QSV 的 `async_depth` 默认 4 会主动增加解码延迟，且 PyAV 按 codec id 选解码器导致
-  `HWAccel("qsv")` 很可能驱动不了 `*_qsv` 独立解码器。README 会写明证据与「若确需 QSV 该怎么做」。
+- **QSV 被主动排除**（见 §3.3）：这不是能力缺失——PyAV 19.0.1 的 Windows wheel 实测已列出 `qsv`
+  （§3.2），排除它是设计取舍；同理也不使用 `d3d12va` / `dxva2` / `cuda` / `amf`。
 - **本机无 Intel 核显**：开发机是 NVIDIA RTX 5090 D v2 + AMD Ryzen 9 9950X。本机只能用 `d3d11va`
-  做端到端管线验证（NVIDIA 同样支持 AV1/HEVC 的 D3D11VA 解码）；**Xe3/QSV 的真实数据必须在
+  做端到端管线验证（NVIDIA 同样支持 AV1/HEVC 的 D3D11VA 解码）；**Xe3 的真实数据必须在
   Panther Lake 机器上采集**。
 - **无 macOS 机器**：VideoToolbox 路径无法在本机验证，靠 API 探测 + 在 Mac 上运行 setup 脚本自查。
   Apple M6 尚未发布，按 Apple Silicon + VideoToolbox 通用路径实现（AV1 硬解需 M3 及以上，运行时显式报告）。
@@ -274,7 +283,7 @@ t1   = perf_counter_ns()
 - 本机执行 `python -m latency_bench --clips ..\clips --hwaccel auto`，4 个片段全跑通，产出 `results/` 下
   全部 4 类文件；硬解断言与无回读校验通过。
 - 时序自检：`ticks.csv` 行数 ≈ `wall_ms / 33`；相邻 tick 间隔中位数 ≈ 33ms。
-- 失败路径：`--hwaccel qsv`（本机不可用）、`--hwaccel videotoolbox`（Windows 不可用）均清晰报错。
+- 失败路径：`--hwaccel qsv` 与 `--hwaccel videotoolbox`（Windows 上均为非法值）都清晰报错。
 
 ## 10. 范围外
 
