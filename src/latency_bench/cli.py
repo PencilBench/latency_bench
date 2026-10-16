@@ -127,8 +127,8 @@ def _print_clip_line(summary: dict[str, Any]) -> None:
     flags = summary.get("flags", {})
     print(
         "  {name:<24} {w}x{h} {codec:<10} hw={hw:<12} dec={decoder:<15} "
-        "frames={frames:<5} mean={mean:>8}µs p95={p95:>8}µs p99={p99:>8}µs "
-        "jitter={jit:>7}µs rt={rt:>6}x hw_ok={hw_ok} readback={rb}".format(
+        "frames={frames:<5} mean={mean:>8}ms p95={p95:>8}ms p99={p99:>8}ms "
+        "jitter={jit:>8}ms rt={rt:>6}x hw_ok={hw_ok} readback={rb}".format(
             name=str(summary.get("clip"))[:24],
             w=src.get("width"),
             h=src.get("height"),
@@ -136,10 +136,10 @@ def _print_clip_line(summary: dict[str, Any]) -> None:
             hw=str(summary.get("hwaccel"))[:12],
             decoder=str(summary.get("decoder") or "container")[:15],
             frames=summary.get("frame_count"),
-            mean=_fmt(dec.get("mean_us"), 1),
-            p95=_fmt(dec.get("p95_us"), 1),
-            p99=_fmt(dec.get("p99_us"), 1),
-            jit=_fmt(dec.get("jitter_us"), 1),
+            mean=_fmt(dec.get("mean_ms"), 3),
+            p95=_fmt(dec.get("p95_ms"), 3),
+            p99=_fmt(dec.get("p99_ms"), 3),
+            jit=_fmt(dec.get("jitter_ms"), 3),
             rt=_fmt(summary.get("realtime_factor"), 2),
             hw_ok="yes" if flags.get("hardware_decode_confirmed") else "NO",
             rb="YES" if flags.get("readback_detected") else "no",
@@ -166,8 +166,8 @@ def _better(a: dict[str, Any] | None, b: dict[str, Any] | None) -> dict[str, Any
         return a
     if b_frames > a_frames:
         return b
-    a_p99 = a.get("decode", {}).get("p99_us") or float("inf")
-    b_p99 = b.get("decode", {}).get("p99_us") or float("inf")
+    a_p99 = a.get("decode", {}).get("p99_ms") or float("inf")
+    b_p99 = b.get("decode", {}).get("p99_ms") or float("inf")
     return b if b_p99 < a_p99 else a
 
 

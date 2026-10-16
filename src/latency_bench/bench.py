@@ -9,7 +9,7 @@
     frms = decode(pkt)          # send_packet + receive_frame；硬件帧留在 GPU
     t1   = perf_counter_ns()
 
-* ``decode_us``（packet 级）= ``t1 - t0``，不含 demux、不含 CPU 回读；
+* ``decode_ms``（packet 级）= ``t1 - t0``，不含 demux、不含 CPU 回读；
 * 每解出一帧写一行 ``frames.csv``；同一 packet 连出多帧时按 ``frames_out`` 均摊；
 * 结尾 ``decode(None)`` 排空流水线，尾部帧标记 ``tail=1``。
 """
@@ -188,7 +188,8 @@ def _ctypes_decoder(
 ) -> Any:
     """用 ctypes 直接驱动 wheel 的 FFmpeg（补上 PyAV 缺失的按名字选解码器）。
 
-    关键差异：**不预设 ``avctx->pix_fmt``**，让 FFmpeg 自己协商到 ``d3d11``。
+    关键差异：**不预设 ``avctx->pix_fmt``**，让 FFmpeg 自己协商到 ``d3d11`` /
+    ``videotoolbox_vld``。
     """
     source = stream.codec_context
     try:
@@ -498,8 +499,8 @@ def run_clip(
             if accel.is_software_pix_fmt(sample.fmt):
                 readback = True
 
-        dec = [s.decode_us for s in window_frames]
-        demux = [s.demux_us for s in window_frames]
+        dec = [s.decode_ms for s in window_frames]
+        demux = [s.demux_ms for s in window_frames]
         n_packets = state["packets_in_tick"]
         state["packets_in_tick"] = 0
         row = TickRow(
@@ -509,14 +510,14 @@ def run_clip(
             frames_in_tick=len(window_frames),
             frames_total=state["frames_total"],
             packets_in_tick=n_packets,
-            decode_us_last=dec[-1] if dec else float("nan"),
-            decode_us_min=min(dec) if dec else float("nan"),
-            decode_us_max=max(dec) if dec else float("nan"),
-            decode_us_avg=(math.fsum(dec) / len(dec)) if dec else float("nan"),
-            decode_us_p50=_percentile(dec, 50.0),
-            decode_us_p95=_percentile(dec, 95.0),
+            decode_ms_last=dec[-1] if dec else float("nan"),
+            decode_ms_min=min(dec) if dec else float("nan"),
+            decode_ms_max=max(dec) if dec else float("nan"),
+            decode_ms_avg=(math.fsum(dec) / len(dec)) if dec else float("nan"),
+            decode_ms_p50=_percentile(dec, 50.0),
+            decode_ms_p95=_percentile(dec, 95.0),
             fps_inst=(len(window_frames) / (tick_ms / 1e3)) if window_frames else 0.0,
-            demux_us_avg=(math.fsum(demux) / len(demux)) if demux else float("nan"),
+            demux_ms_avg=(math.fsum(demux) / len(demux)) if demux else float("nan"),
             wall_ms=elapsed_s * 1e3,
             tick_drift_ms=ticker.drift_ms,
         )

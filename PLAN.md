@@ -145,7 +145,7 @@ those libraries”，该注释相对 19.0.1 的 Windows wheel **已经过时**�
 
 ### 3.5 计时精度限制
 
-PyAV 无 `send_packet` / `receive_frame` 分离接口，`decode_us` 是**稳态下每 packet 的解码耗时**，
+PyAV 无 `send_packet` / `receive_frame` 分离接口，`decode_ms` 是**稳态下每 packet 的解码耗时**，
 受解码器流水线深度影响，不完全等同「packet 到帧就绪」的端到端延迟。该限制需在文档中显式说明。
 
 ## 4. 目录结构
@@ -190,8 +190,8 @@ frms = pkt.decode()           # 含 send_packet + receive_frame；硬件帧留�
 t1   = perf_counter_ns()
 ```
 
-- `decode_us`（packet 级）= `t1 - t0`：本次交给 libavcodec 的解码耗时，**不含 demux、不含回读**。
-- `frames_out` = `len(frms)`；`decode_us_per_frame` = `decode_us / max(1, frames_out)`。
+- `decode_ms`（packet 级）= `t1 - t0`：本次交给 libavcodec 的解码耗时，**不含 demux、不含回读**。
+- `frames_out` = `len(frms)`；`decode_ms_per_frame` = `decode_ms / max(1, frames_out)`。
 - 每解出一帧写一行 `frames.csv`，并用 `frame.pts` 记录 PTS。
 - 结尾 `flush_buffers()` / `decode(None)` 排空流水线，尾部帧单独标记。
 - **不做软解**：`allow_software_fallback=False`，并断言 `stream.codec_context.is_hwaccel()` 为真，否则直接失败。

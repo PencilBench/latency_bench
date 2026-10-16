@@ -40,10 +40,10 @@ FRAME_COLUMNS = [
     "packet_index",
     "pts",
     "pts_ms",
-    "demux_us",
-    "decode_us",
+    "demux_ms",
+    "decode_ms",
     "frames_out",
-    "decode_us_per_frame",
+    "decode_ms_per_frame",
     "keyframe",
     "pict_type",
     "format",
@@ -57,14 +57,14 @@ TICK_COLUMNS = [
     "frames_in_tick",
     "frames_total",
     "packets_in_tick",
-    "decode_us_last",
-    "decode_us_min",
-    "decode_us_max",
-    "decode_us_avg",
-    "decode_us_p50",
-    "decode_us_p95",
+    "decode_ms_last",
+    "decode_ms_min",
+    "decode_ms_max",
+    "decode_ms_avg",
+    "decode_ms_p50",
+    "decode_ms_p95",
     "fps_inst",
-    "demux_us_avg",
+    "demux_ms_avg",
     "wall_ms",
     "tick_drift_ms",
 ]
@@ -87,16 +87,16 @@ class FrameSample:
     tail: bool
 
     @property
-    def demux_us(self) -> float:
-        return self.demux_ns / 1e3
+    def demux_ms(self) -> float:
+        return self.demux_ns / 1e6
 
     @property
-    def decode_us(self) -> float:
-        return self.decode_ns / 1e3
+    def decode_ms(self) -> float:
+        return self.decode_ns / 1e6
 
     @property
-    def decode_us_per_frame(self) -> float:
-        return self.decode_ns / 1e3 / max(1, self.frames_out)
+    def decode_ms_per_frame(self) -> float:
+        return self.decode_ns / 1e6 / max(1, self.frames_out)
 
     def as_row(self) -> list[Any]:
         return [
@@ -104,10 +104,10 @@ class FrameSample:
             self.packet_index,
             self.pts,
             self.pts_ms,
-            self.demux_ns / 1e3,
-            self.decode_us,
+            self.demux_ms,
+            self.decode_ms,
             self.frames_out,
-            self.decode_us_per_frame,
+            self.decode_ms_per_frame,
             int(self.keyframe),
             self.pict_type,
             self.fmt,
@@ -123,14 +123,14 @@ class TickRow:
     frames_in_tick: int
     frames_total: int
     packets_in_tick: int
-    decode_us_last: float
-    decode_us_min: float
-    decode_us_max: float
-    decode_us_avg: float
-    decode_us_p50: float
-    decode_us_p95: float
+    decode_ms_last: float
+    decode_ms_min: float
+    decode_ms_max: float
+    decode_ms_avg: float
+    decode_ms_p50: float
+    decode_ms_p95: float
     fps_inst: float
-    demux_us_avg: float
+    demux_ms_avg: float
     wall_ms: float
     tick_drift_ms: float
 
@@ -397,7 +397,7 @@ def render_markdown(payload: dict[str, Any]) -> str:
         lines.append("")
         lines.append(
             "| 片段 | Codec | 分辨率 | Mbps | hwaccel | 解码器 | 硬解 | 回读 | "
-            "帧数 | 均值 µs | p50 µs | p95 µs | p99 µs | max µs | 抖动 µs | 实时倍率 |"
+            "帧数 | 均值 ms | p50 ms | p95 ms | p99 ms | max ms | 抖动 ms | 实时倍率 |"
         )
         lines.append("|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|")
         for c in clips:
@@ -425,12 +425,12 @@ def render_markdown(payload: dict[str, Any]) -> str:
                     hw_ok="是" if flags.get("hardware_decode_confirmed") else "**否**",
                     readback="**是**" if flags.get("readback_detected") else "否",
                     frames=c.get("frame_count", "—"),
-                    mean=_fmt(dec.get("mean_us")),
-                    p50=_fmt(dec.get("median_us")),
-                    p95=_fmt(dec.get("p95_us")),
-                    p99=_fmt(dec.get("p99_us")),
-                    mx=_fmt(dec.get("max_us")),
-                    jit=_fmt(dec.get("jitter_us")),
+                    mean=_fmt(dec.get("mean_ms"), 3),
+                    p50=_fmt(dec.get("median_ms"), 3),
+                    p95=_fmt(dec.get("p95_ms"), 3),
+                    p99=_fmt(dec.get("p99_ms"), 3),
+                    mx=_fmt(dec.get("max_ms"), 3),
+                    jit=_fmt(dec.get("jitter_ms"), 3),
                     rt=_fmt(c.get("realtime_factor"), 2),
                 )
             )

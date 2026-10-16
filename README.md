@@ -91,8 +91,14 @@ frms = decode(pkt)            # send_packet + receive_frame；硬件帧留在 GP
 t1   = perf_counter_ns()
 ```
 
-* `decode_us`（packet 级）= `t1 - t0`：交给 libavcodec 的解码耗时，**不含 demux、不含回读**；
-* 同一 packet 连出多帧时按 `frames_out` 均摊（`decode_us_per_frame`）；
+* `decode_ms`（packet 级）= `t1 - t0`：交给 libavcodec 的解码耗时，**不含 demux、不含回读**；
+* 同一 packet 连出多帧时按 `frames_out` 均摊（`decode_ms_per_frame`）；
+* **开头第 0 帧默认不参与统计**（`--skip-first-frames 1`）。它带着解码器初始化开销
+  （实测 **18–26 ms**，而稳态均值只有 1–6 ms），留在统计里会把 `p99`/`max` 显著抬高
+  （实测某片段 p99 从 19.985 ms 降到 1.593 ms）。**解码流程完全不受影响**：帧照解、
+  `frames.csv` 照写、`frame_count` 照记，只是这些帧不进均值/分位数/抖动/实时倍率，
+  也不出现在「偏慢的帧」里 —— 因此 `decode.count` 会比 `frame_count` 少 N。
+  实际排除的数量记在 summary 的 `skipped_first_frames`；
 * 结尾排空流水线，尾部帧在 CSV 里标记 `tail=1`；
 * 主解码线程只做计时，样本按批推给 ticker 线程；ticker 每 33 ms 写一行
   `ticks.csv` 并 `flush()` 逐帧 CSV，保证盘上每 33 ms 有新鲜数据。
@@ -113,7 +119,7 @@ results/<run_id>/
 
 ## 结果解读
 
-* **`decode_us`** 是稳态下**每 packet** 的解码耗时。PyAV 没有
+* **`decode_ms`** 是稳态下**每 packet** 的解码耗时。PyAV 没有
   `send_packet()` / `receive_frame()` 分离接口，因此该数值受解码器流水线深度影响，
   **不完全等同「packet 到帧就绪」的端到端延迟**。
 * **`实时倍率`** = `(帧数 / 平均帧率) / 解码墙钟`；变帧率素材（H265 两段 `stts` 有
@@ -127,12 +133,12 @@ results/<run_id>/
 
 ### 本机参考数据（RTX 5090 D v2 + Ryzen 9 9950X，仅供对照）
 
-| 片段 | 解码器 | 帧数 | 均值 µs | p50 µs | p95 µs | p99 µs | 实时倍率 |
+| 片段 | 解码器 | 帧数 | 均值 ms | p50 ms | p95 ms | p99 ms | 实时倍率 |
 |---|---|---|---|---|---|---|---|
-| AV1 4K 112 Mbps | 原生 `av1` + d3d11va | 598 | 3782 | 3833 | 5483 | 6267 | 4.29 |
-| AV1 1080p 30 Mbps | 原生 `av1` + d3d11va | 595 | 883 | 90 | 4708 | 14385 | 18.71 |
-| H265 4K 126 Mbps | `hevc` + d3d11va | 600 | 2580 | 2208 | 2948 | 5525 | 6.44 |
-| H265 1080p 28 Mbps | `hevc` + d3d11va | 595 | 779 | 83 | 291 | 25389 | 21.83 |
+| AV1 4K 112 Mbps | 原生 `av1` + d3d11va | 598 | 3.782 | 3.833 | 5.483 | 6.267 | 4.29 |
+| AV1 1080p 30 Mbps | 原生 `av1` + d3d11va | 595 | 0.883 | 0.090 | 4.708 | 14.385 | 18.71 |
+| H265 4K 126 Mbps | `hevc` + d3d11va | 600 | 2.580 | 2.208 | 2.948 | 5.525 | 6.44 |
+| H265 1080p 28 Mbps | `hevc` + d3d11va | 595 | 0.779 | 0.083 | 0.291 | 25.389 | 21.83 |
 
 **这不是 Xe3 的数据** —— 本机是 NVIDIA 独显 + AMD CPU，只用于验证管线。
 
@@ -190,7 +196,8 @@ PyAV 的 `av.open(..., hwaccel=...)` 对 AV1 素材直接抛
 ### 做法
 
 `src/latency_bench/ffmpeg_ctypes.py` 用 `ctypes` 直接调 **PyAV wheel 自带的
-FFmpeg 动态库**（`site-packages/av.libs/avcodec-63-*.dll`）：
+FFmpeg 动态库**（Windows：`site-packages/av.libs/avcodec-63-*.dll`；
+macOS：`site-packages/av/.dylibs/libavcodec.63.*.dylib`）：
 
 * **解复用仍交给 PyAV**（它工作正常），只把「解码」这一步换掉；
 * 用 `avcodec_find_decoder_by_name("av1")` **按名字**选中原生解码器；

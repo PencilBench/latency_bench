@@ -23,14 +23,14 @@ from latency_bench.reporting import (
 )
 
 
-def _sample(index: int, decode_us: float = 1000.0, *, tail: bool = False) -> FrameSample:
+def _sample(index: int, decode_ms: float = 1.0, *, tail: bool = False) -> FrameSample:
     return FrameSample(
         index=index,
         packet_index=index,
         pts=index,
         pts_ms=float(index),
         demux_ns=5_000,
-        decode_ns=int(decode_us * 1e3),
+        decode_ns=int(decode_ms * 1e6),
         frames_out=1,
         keyframe=index == 0,
         pict_type="P",
@@ -116,14 +116,14 @@ def test_summarize_ticks_self_check():
             frames_in_tick=10,
             frames_total=10 * (i + 1),
             packets_in_tick=10,
-            decode_us_last=100.0,
-            decode_us_min=90.0,
-            decode_us_max=110.0,
-            decode_us_avg=100.0,
-            decode_us_p50=100.0,
-            decode_us_p95=108.0,
+            decode_ms_last=0.1,
+            decode_ms_min=0.09,
+            decode_ms_max=0.11,
+            decode_ms_avg=0.1,
+            decode_ms_p50=0.1,
+            decode_ms_p95=0.108,
             fps_inst=303.0,
-            demux_us_avg=20.0,
+            demux_ms_avg=0.02,
             wall_ms=i * 33.0,
             tick_drift_ms=0.0,
         )
@@ -196,7 +196,7 @@ def _summary(**overrides):
         "is_vfr": False,
     }
     clip.update(overrides.pop("clip", {}))
-    samples = overrides.pop("samples", [_sample(i, 1000.0 + i * 10) for i in range(300)])
+    samples = overrides.pop("samples", [_sample(i, 1.0 + i * 0.01) for i in range(300)])
     plan = overrides.pop("plan", DecodePlan(hwaccel="d3d11va", decoder="av1"))
     ticks = overrides.pop(
         "ticks",
@@ -232,8 +232,8 @@ def test_build_clip_summary_fields():
     assert s["average_frame_rate"] == pytest.approx(300 / 9.92)
     assert s["realtime_factor"] == pytest.approx((300 / (300 / 9.92)) / 0.5)
     assert s["decode"]["count"] == 300
-    # 样本 decode_us = 1000 + 10 * i（i = 0..299）-> 均值 2495
-    assert s["decode"]["mean_us"] == pytest.approx(2495.0)
+    # 样本 decode_ms = 1.0 + 0.01 * i（i = 0..299）-> 均值 2.495 ms
+    assert s["decode"]["mean_ms"] == pytest.approx(2.495)
     assert s["ticks"]["count"] == 1
     json.dumps(s)  # 必须可序列化
 
