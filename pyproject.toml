@@ -24,4 +24,6 @@ packages = ["src/latency_bench"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
-addopts = "-q"
+addopts = "-q -p no:tmpdir"
+# 关闭内置 tmpdir：它会用 mkdir(mode=0o700) 在仓库根留下 .pytest-tmp-* 目录，
+# 而本机环境下这种目录随后无法列出/删除（见 tests/conftest.py 的 work_dir fixture）。
