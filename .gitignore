@@ -9,3 +9,12 @@ __pycache__/
 .pytest_cache/
 build/
 dist/
+
+# 临时目录 / 临时探测脚本
+.tmp/
+.pytest-tmp-*/
+.pytest-work-*/
+pytest-cache-files-*/
+tmp-*/
+_permprobe-*/
+_*probe*.py
