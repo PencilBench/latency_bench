@@ -84,7 +84,7 @@ step "安装依赖（av>=19, pytest）"
 "$venv_python" -m pip install "av>=19,<20" "pytest>=8" --disable-pip-version-check
 
 step "以可编辑方式安装本项目"
-(cd "$repo_root" && "$venv_python" -m pip install -e . --no-build-isolation --disable-pip-version-check)
+(cd "$repo_root" && "$venv_python" -m pip install -e . --disable-pip-version-check)
 
 # --- 4. 能力自检 --------------------------------------------------------------
 step "硬件加速能力自检（macOS 应看到 videotoolbox）"

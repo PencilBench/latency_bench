@@ -1,4 +1,4 @@
-<#
+﻿<#
 .SYNOPSIS
     在 Windows 上准备 latency_bench 的 Python 环境。
 
@@ -117,7 +117,7 @@ Write-Step "安装依赖（av>=19, pytest）"
 Write-Step "以可编辑方式安装本项目"
 Push-Location $repoRoot
 try {
-    & $venvPython -m pip install -e . --no-build-isolation --disable-pip-version-check
+    & $venvPython -m pip install -e . --disable-pip-version-check
 } finally {
     Pop-Location
 }
