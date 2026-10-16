@@ -1,6 +1,12 @@
 # Benchmark output
 results/
 
+# 素材（foundation-sunshine clip recorder 产出，体积大，不进仓库）
+clips/
+
+# macOS
+.DS_Store
+
 # Python
 .venv/
 __pycache__/
