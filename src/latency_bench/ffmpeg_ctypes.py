@@ -11,6 +11,9 @@
 
 修法是两条：**按名字选解码器**，以及**不要预设 pix_fmt**（让 FFmpeg 自己协商）。
 这样做之后 AV1 + D3D11VA 正常工作：出帧格式为 ``d3d11``，1080p 约 936 fps、4K 约 256 fps。
+macOS 上的 AV1 + VideoToolbox 同理：PyAV 会把 ``avctx->pix_fmt`` 预设成
+``videotoolbox`` 并让 ``avcodec_send_packet()`` 返回 EINVAL(22)，走本后端则能正常
+协商出 ``videotoolbox_vld`` 帧（实测 M6，1080p 约 716 fps）。
 
 实现要点：解复用仍交给 PyAV（它工作正常），只把「解码」这一步换成 ctypes 调用，
 因此本项目其余部分（33 ms ticker、CSV/JSON、统计）完全不用改。
@@ -38,7 +41,7 @@ __all__ = [
 
 # 这些「编解码器 × 设备类型」组合需要 ctypes 后端（PyAV 选不到原生解码器）
 NATIVE_HW_DECODERS: dict[str, dict[str, str]] = {
-    "av1": {"d3d11va": "av1", "d3d12va": "av1"},
+    "av1": {"d3d11va": "av1", "d3d12va": "av1", "videotoolbox": "av1"},
 }
 
 
@@ -90,8 +93,14 @@ class StructOffsets:
 
 AVMEDIA_TYPE_VIDEO = 0
 AV_PIX_FMT_D3D11 = 171
-AVERROR_EAGAIN = -11
 AVERROR_EOF = -541478725
+
+#: ``AVERROR(EAGAIN)`` 就是 ``-EAGAIN``，而 ``EAGAIN`` 是**平台相关**的：
+#: Linux/Windows 上是 11，macOS（BSD errno）上是 35。写死 -11 会让 macOS 上
+#: 「解码器暂时没有输出帧」这一正常情况被当成致命错误（实测
+#: ``avcodec_receive_frame()`` 在 VideoToolbox 上返回 -35）。
+EAGAIN_ERRNO: int = 35 if sys.platform == "darwin" else 11
+AVERROR_EAGAIN: int = -EAGAIN_ERRNO
 AV_PKT_FLAG_KEY = 1
 AV_INPUT_BUFFER_PADDING_SIZE = 64
 
@@ -124,35 +133,55 @@ class FfmpegLibraries:
 
 
 def ffmpeg_shared_dir() -> Path:
-    """PyAV wheel 把 FFmpeg 动态库放在 ``av.libs``（delvewheel）里。"""
+    """PyAV wheel 自带的 FFmpeg 动态库目录。
+
+    Windows（delvewheel）放在 ``av.libs``；macOS（delocate）放在 ``av/.dylibs``。
+    """
     import av as _av
 
     pkg_dir = Path(_av.__file__).resolve().parent
-    for candidate in (pkg_dir / ".." / "av.libs", pkg_dir.parent / "av.libs"):
+    for candidate in (
+        pkg_dir / ".dylibs",
+        pkg_dir / ".." / "av.libs",
+        pkg_dir.parent / "av.libs",
+    ):
         if candidate.is_dir():
             return candidate.resolve()
     raise CtypesFfmpegUnavailable(
-        f"找不到 PyAV 的 FFmpeg 动态库目录（av.libs），已查：{pkg_dir.parent / 'av.libs'}"
+        f"找不到 PyAV 的 FFmpeg 动态库目录，已查：{pkg_dir / '.dylibs'}、"
+        f"{pkg_dir.parent / 'av.libs'}"
     )
 
 
-def _find_one(directory: Path, stem: str) -> Path:
-    matches = sorted(directory.glob(f"{stem}-*.dll")) or sorted(directory.glob(f"{stem}*.dll"))
-    if not matches:
-        raise CtypesFfmpegUnavailable(f"在 {directory} 里找不到 {stem} 动态库")
-    return matches[0]
+def _find_library(directory: Path, stem: str) -> Path:
+    """按平台命名约定找单个 FFmpeg 动态库（Windows ``avcodec-*.dll`` / macOS ``libavcodec*.dylib``）。"""
+    patterns = (
+        (f"{stem}-*.dll", f"{stem}*.dll")
+        if sys.platform == "win32"
+        else (f"lib{stem}-*.dylib", f"lib{stem}*.dylib", f"{stem}*.dylib")
+    )
+    for pattern in patterns:
+        matches = sorted(directory.glob(pattern))
+        if matches:
+            return matches[0]
+    raise CtypesFfmpegUnavailable(
+        f"在 {directory} 里找不到 {stem} 动态库（试过：{', '.join(patterns)}）"
+    )
 
 
 def load_libraries(directory: Path | None = None) -> FfmpegLibraries:
-    """加载 avutil / avcodec。"""
-    if sys.platform != "win32":
-        raise CtypesFfmpegUnavailable("ctypes FFmpeg 后端目前只实现 Windows（d3d11va）路径")
+    """加载 avutil / avcodec（Windows 的 .dll 与 macOS 的 .dylib）。"""
+    if sys.platform not in ("win32", "darwin"):
+        raise CtypesFfmpegUnavailable(
+            f"ctypes FFmpeg 后端只实现 Windows（d3d11va）与 macOS（videotoolbox）路径，"
+            f"当前平台 {sys.platform!r} 不受支持"
+        )
     directory = directory or ffmpeg_shared_dir()
     if hasattr(os, "add_dll_directory"):
         os.add_dll_directory(str(directory))
 
-    avutil_path = _find_one(directory, "avutil")
-    avcodec_path = _find_one(directory, "avcodec")
+    avutil_path = _find_library(directory, "avutil")
+    avcodec_path = _find_library(directory, "avcodec")
     # avcodec 依赖 avutil，先把 avutil 加载进来
     avutil = ctypes.CDLL(str(avutil_path))
     avcodec = ctypes.CDLL(str(avcodec_path))

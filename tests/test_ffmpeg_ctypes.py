@@ -23,14 +23,27 @@ def test_native_hw_decoders_covers_av1_d3d11va():
     assert ffmpeg_ctypes.NATIVE_HW_DECODERS["av1"]["d3d12va"] == "av1"
 
 
-def test_needs_ctypes_backend_only_for_av1_d3d():
+def test_native_hw_decoders_covers_av1_videotoolbox():
+    """macOS 的 AV1 也要走 ctypes 后端（PyAV 会给原生 av1 预设 pix_fmt 而失败）。"""
+    assert ffmpeg_ctypes.NATIVE_HW_DECODERS["av1"]["videotoolbox"] == "av1"
+
+
+def test_needs_ctypes_backend_only_for_av1_d3():
     assert bench._needs_ctypes_backend("av1", "d3d11va") is True
     assert bench._needs_ctypes_backend("av1", "d3d12va") is True
-    # HEVC 走 PyAV 就够了（原生 hevc 解码器本来就带 d3d11va）
+    assert bench._needs_ctypes_backend("av1", "videotoolbox") is True
+    # HEVC 走 PyAV 就够了（原生 hevc 解码器本来就带 d3d11va / videotoolbox）
     assert bench._needs_ctypes_backend("hevc", "d3d11va") is False
+    assert bench._needs_ctypes_backend("hevc", "videotoolbox") is False
     # 软解 / 未知编解码器
     assert bench._needs_ctypes_backend("av1", None) is False
     assert bench._needs_ctypes_backend("theora", "d3d11va") is False
+
+
+def test_averror_eagain_is_platform_aware():
+    """``AVERROR(EAGAIN)`` = ``-EAGAIN``，而 macOS 的 EAGAIN 是 35 而不是 11。"""
+    assert ffmpeg_ctypes.EAGAIN_ERRNO == (35 if ffmpeg_ctypes.sys.platform == "darwin" else 11)
+    assert ffmpeg_ctypes.AVERROR_EAGAIN == -ffmpeg_ctypes.EAGAIN_ERRNO
 
 
 def test_struct_offsets_are_within_plausible_range():
@@ -131,18 +144,33 @@ def test_load_libraries_reports_missing_directory(work_dir: Path):
 def test_ffmpeg_shared_dir_points_at_existing_directory():
     directory = ffmpeg_ctypes.ffmpeg_shared_dir()
     assert directory.is_dir()
-    assert directory.name == "av.libs"
-    assert list(directory.glob("avcodec-*.dll")) or list(directory.glob("avcodec*.dll"))
+    if ffmpeg_ctypes.sys.platform == "win32":
+        assert directory.name == "av.libs"
+        assert list(directory.glob("avcodec-*.dll")) or list(directory.glob("avcodec*.dll"))
+    else:
+        # macOS：PyAV wheel 用 delocate，库在 av/.dylibs 下且带 lib 前缀
+        assert directory.name == ".dylibs"
+        assert list(directory.glob("libavcodec*.dylib"))
 
 
 def test_libraries_load_and_report_version():
     libs = ffmpeg_ctypes.load_libraries()
     major, minor, micro = libs.version("avcodec")
     assert major >= 60 and minor >= 0
-    assert libs.files["avcodec"].startswith("avcodec-")
+    assert libs.files["avcodec"].startswith(("avcodec-", "libavcodec"))
 
 
-def test_load_libraries_rejects_non_windows(monkeypatch):
-    monkeypatch.setattr(ffmpeg_ctypes.sys, "platform", "darwin")
-    with pytest.raises(ffmpeg_ctypes.CtypesFfmpegUnavailable):
-        ffmpeg_ctypes.load_libraries()
+def test_load_libraries_rejects_unsupported_platform(monkeypatch):
+    """只实现 Windows 与 macOS；其它平台要给出干净的报错。"""
+    for platform in ("linux", "freebsd"):
+        monkeypatch.setattr(ffmpeg_ctypes.sys, "platform", platform)
+        with pytest.raises(ffmpeg_ctypes.CtypesFfmpegUnavailable):
+            ffmpeg_ctypes.load_libraries()
+
+
+def test_load_libraries_finds_libraries_on_macos():
+    if ffmpeg_ctypes.sys.platform != "darwin":
+        pytest.skip("只在 macOS 上验证 .dylib 分支")
+    libs = ffmpeg_ctypes.load_libraries()
+    assert libs.files["avutil"].startswith("libavutil")
+    assert libs.files["avcodec"].startswith("libavcodec")
