@@ -12,9 +12,19 @@ dist/
 
 # 临时目录 / 临时探测脚本
 .tmp/
+.src/                          # 一次性下载的 FFmpeg 源码/头（只用于推导结构体偏移）
 .pytest-tmp-*/
 .pytest-work-*/
 pytest-cache-files-*/
 tmp-*/
 _permprobe-*/
 _*probe*.py
+_*_probe*.py
+_ffmpeg_offsets.*
+_fetch_*.py
+_extract_hdr.py
+_find_ffmpeg_ref.py
+_avcc_layout.py
+_scan_ffmpeg*.py
+_dbg_struct.py
+_lint.py

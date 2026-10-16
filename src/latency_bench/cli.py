@@ -145,6 +145,13 @@ def _print_clip_line(summary: dict[str, Any]) -> None:
             rb="YES" if flags.get("readback_detected") else "no",
         )
     )
+    backend = summary.get("backend") or {}
+    if backend.get("backend") == "ctypes-ffmpeg":
+        print(
+            f"      后端 ctypes-ffmpeg：按名字选中原生 {backend.get('decoder')} 解码器"
+            f"（PyAV 会选中 libdav1d，故走本后端）；"
+            f"出帧格式 {', '.join(backend.get('output_formats') or []) or '—'}"
+        )
 
 
 def _better(a: dict[str, Any] | None, b: dict[str, Any] | None) -> dict[str, Any] | None:

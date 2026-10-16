@@ -574,6 +574,7 @@ def build_clip_summary(
     tail_frames: int = 0,
     stop_reason: str | None = None,
     expected_frames: int | None = None,
+    backend: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """组装单个片段的 ``<clip>__<hwaccel>.summary.json`` 内容。"""
     decode_ns = [s.decode_ns for s in samples]
@@ -590,6 +591,7 @@ def build_clip_summary(
         "path": clip.get("path"),
         "hwaccel": plan.hwaccel,
         "decoder": plan.decoder,
+        "backend": backend,
         "hwaccel_owned": True,
         "allow_software_fallback": plan.allow_software_fallback,
         "source": {

@@ -25,7 +25,7 @@ from typing import Any, Mapping, Sequence
 
 import av
 
-from . import accel, stats
+from . import accel, ffmpeg_ctypes, stats
 from .accel import AccelError, DecodePlan, PlanAttempt
 from .reporting import (
     FrameSample,
@@ -44,6 +44,9 @@ __all__ = [
     "run_clip",
 ]
 
+#: 保住 PyAV 的 HWAccel 对象引用（解码期间不能被 GC 回收）。
+_HWACCEL_REFS: dict[int, Any] = {}
+
 
 @dataclass
 class DecodeSession:
@@ -60,6 +63,13 @@ class DecodeSession:
             self.container.close()
         except Exception:
             pass
+        _HWACCEL_REFS.pop(id(self.decoder), None)
+        closer = getattr(self.decoder, "close", None)
+        if callable(closer):
+            try:
+                closer()
+            except Exception:
+                pass
 
 
 @dataclass
@@ -111,6 +121,17 @@ def _container_default_decoder(stream: Any, hwaccel: accel.HWAccelLike | None) -
     return context
 
 
+def _needs_ctypes_backend(codec_name: str, hwaccel: str | None) -> bool:
+    """这个「编解码器 × 设备类型」是否必须走 ctypes 后端。
+
+    目前只有 AV1 + D3D11VA：PyAV 会用 ``avcodec_find_decoder()`` 选中不带 hwaccel 的
+    ``libdav1d``，而它没有「按名字选解码器」的入口。
+    """
+    if not hwaccel:
+        return False
+    return hwaccel in ffmpeg_ctypes.NATIVE_HW_DECODERS.get(codec_name, {})
+
+
 def _manual_decoder(
     stream: Any,
     decoder_name: str,
@@ -158,6 +179,31 @@ def _manual_decoder(
     return context, hwaccel
 
 
+def _ctypes_decoder(
+    stream: Any,
+    decoder_name: str,
+    hwaccel: str,
+    *,
+    thread_count: int = 1,
+) -> Any:
+    """用 ctypes 直接驱动 wheel 的 FFmpeg（补上 PyAV 缺失的按名字选解码器）。
+
+    关键差异：**不预设 ``avctx->pix_fmt``**，让 FFmpeg 自己协商到 ``d3d11``。
+    """
+    source = stream.codec_context
+    try:
+        return ffmpeg_ctypes.make_decoder(
+            decoder_name,
+            width=source.width,
+            height=source.height,
+            extradata=bytes(source.extradata) if source.extradata else None,
+            hwaccel=hwaccel,
+            thread_count=thread_count,
+        )
+    except ffmpeg_ctypes.CtypesFfmpegUnavailable as exc:
+        raise AccelError(f"ctypes FFmpeg 后端不可用：{exc}") from exc
+
+
 def open_session(
     path: str,
     plan: DecodePlan,
@@ -184,7 +230,13 @@ def open_session(
     container = av.open(path)
     try:
         stream = container.streams.video[0]
-        if plan.decoder:
+        codec_name = (clip.get("codec_id") or clip.get("codec") or "").lower()
+        if plan.decoder and _needs_ctypes_backend(codec_name, plan.hwaccel):
+            decoder_ctx = _ctypes_decoder(
+                stream, plan.decoder, plan.hwaccel, thread_count=thread_count
+            )
+            hwaccel_ref = hwaccel
+        elif plan.decoder:
             decoder_ctx, hwaccel_ref = _manual_decoder(
                 stream, plan.decoder, hwaccel, thread_count=thread_count
             )
@@ -194,6 +246,10 @@ def open_session(
     except Exception:
         container.close()
         raise
+
+    # 保留 hwaccel 引用，避免被 GC 提前回收（PyAV 的上下文不持有它，
+    # 而 PyAV 的 Cython 类不允许挂自定义属性）。
+    _HWACCEL_REFS[id(decoder_ctx)] = hwaccel_ref
 
     return DecodeSession(
         container=container,
@@ -235,12 +291,18 @@ def probe_plan(
                 hwaccels.append(alt)
 
     candidates: list[tuple[str, str | None]] = []
+    native = ffmpeg_ctypes.NATIVE_HW_DECODERS.get(codec_name, {})
     for hw in hwaccels:
+        # 需要 ctypes 后端的组合优先：它按名字选原生解码器，AV1 + D3D11VA 只有它能建起来。
+        if requested_decoder in (None, "auto", "") and hw in native:
+            candidates.append((hw, native[hw]))
         if requested_decoder in (None, "auto", ""):
             for name in accel.decoder_candidates(codec_name, hw):
-                candidates.append((hw, name))
+                if (hw, name) not in candidates:
+                    candidates.append((hw, name))
         else:
-            candidates.append((hw, requested_decoder))
+            if (hw, requested_decoder) not in candidates:
+                candidates.append((hw, requested_decoder))
 
     for hw, decoder_name in candidates:
         if not accel.device_type_available(hw):
@@ -575,6 +637,7 @@ def run_clip(
         if accel.is_software_pix_fmt(name):
             readback = True
     confirmed = _hardware_confirmed(decoder_ctx, hw_formats, readback)
+    backend_info = decoder_ctx.as_dict() if hasattr(decoder_ctx, "as_dict") else None
 
     ticks = summarize_ticks(tick_rows, tick_ms, wall_s * 1e3)
     summary = build_clip_summary(
@@ -597,6 +660,7 @@ def run_clip(
             else ("max-frames" if max_frames is not None else "expected-frame-count")
         ),
         expected_frames=expected_frames,
+        backend=backend_info,
     )
     summary["sample_trimmed"] = sink.trimmed
     return ClipRunResult(
