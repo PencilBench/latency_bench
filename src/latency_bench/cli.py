@@ -70,7 +70,18 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="允许软解回退（默认禁止）。打开后结果不再代表硬件解码延迟。",
     )
-    parser.add_argument("--repeat", type=int, default=1, help="每个片段重复次数（取最优一轮）")
+    parser.add_argument(
+        "--repeat", type=int, default=1, help="每个片段重复次数（取最优一轮）"
+    )
+    parser.add_argument(
+        "--skip-first-frames",
+        type=int,
+        default=1,
+        help=(
+            "只在统计口径上排除开头 N 个帧（默认 1，即排除含解码器初始化开销的第 0 帧）；"
+            "帧照常解码、照常写 CSV，填 0 表示不排除"
+        ),
+    )
     parser.add_argument(
         "--warmup",
         type=int,
@@ -266,6 +277,7 @@ def run(argv: Sequence[str] | None = None) -> int:
                 max_frames=args.max_frames,
                 max_wall_s=args.max_wall_seconds,
                 thread_count=args.thread_count,
+                skip_first_frames=args.skip_first_frames,
             )
             attempts_all.extend(result.attempts)
             if result.error or result.summary is None:

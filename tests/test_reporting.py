@@ -266,6 +266,91 @@ def test_render_markdown_without_clips():
     assert "## 口径说明" in md
 
 
+# --------------------------------------------------------------------------------------
+# 只在统计口径上排除第 0 帧
+# --------------------------------------------------------------------------------------
+
+
+def test_skip_first_frames_default_is_one():
+    """默认排除第 0 帧：它带着解码器初始化开销，会把 p99/max 显著抬高。"""
+    from latency_bench.cli import build_parser
+
+    assert build_parser().parse_args([]).skip_first_frames == 1
+    assert build_parser().parse_args(["--skip-first-frames", "0"]).skip_first_frames == 0
+
+
+def test_skip_first_frames_affects_stats_only():
+    """排除只作用在统计口径：帧数照记，只是统计样本少一个。"""
+    s = _summary(skip_first_frames=1)
+    assert s["skipped_first_frames"] == 1
+    assert s["frame_count"] == 300          # 帧数照记
+    assert s["decode"]["count"] == 299      # 统计样本少一个
+    assert s["demux"]["count"] == 299
+    assert s["decode_per_frame_ms"]["count"] == 299
+
+
+def test_skip_first_frames_removes_first_frame_outlier():
+    """第 0 帧若是异常慢帧，排除后不应再影响统计，也不该出现在偏慢帧里。"""
+    samples = [_sample(0, 25.0)] + [_sample(i, 1.0) for i in range(1, 50)]
+    without = _summary(samples=samples, skip_first_frames=1)
+    with_all = _summary(samples=samples, skip_first_frames=0)
+
+    assert without["decode"]["max_ms"] == pytest.approx(1.0)
+    assert with_all["decode"]["max_ms"] == pytest.approx(25.0)
+    assert without["slow_frames"] is None
+    assert with_all["slow_frames"]["count"] == 1
+    assert with_all["slow_frames"]["first_index"] == 0
+
+
+def test_slow_frame_indices_keep_original_frame_numbers():
+    """排除开头帧后，偏慢帧报出的仍应是原始帧号（与 frames.csv 对齐）。"""
+    # _summary 固定用 300 帧，覆盖传入的 samples，因此这里直接用 build_clip_summary
+    # 构造一个 10 帧的小样本：第 5 帧 9 ms 是唯一慢帧。
+    samples = [_sample(i, 1.0) for i in range(5)] + [_sample(5, 9.0)] + [
+        _sample(i, 1.0) for i in range(6, 10)
+    ]
+    s = build_clip_summary(
+        clip={"name": "c.mp4", "duration_s": 10.0, "avg_frame_rate": 30.0},
+        plan=DecodePlan(hwaccel="d3d11va", decoder="av1"),
+        attempts=[],
+        samples=samples,
+        frames_total=10,
+        packets_total=10,
+        wall_s=1.0,
+        hardware_confirmed=True,
+        readback_detected=False,
+        hw_pix_fmts=["d3d11"],
+        ticks={"count": 0},
+        skip_first_frames=2,
+    )
+    # 第 5 帧是原始帧号；相对剩余样本的序号是 5-2=3，加回偏移后仍是 5
+    assert s["slow_frames"]["first_index"] == 5
+    assert s["slow_frames"]["indices"] == [5]
+    # 0、1 号帧被排除，统计样本从第 2 帧算起
+    assert s["decode"]["count"] == 8
+    assert s["skipped_first_frames"] == 2
+
+
+def test_summary_skip_defaults_to_zero_for_callers():
+    """构造 summary 的默认值保持 0，避免调用方出现意外口径。"""
+    s = _summary()
+    assert s["skipped_first_frames"] == 0
+    assert s["decode"]["count"] == 300
+
+
+def test_render_markdown_notes_skipped_frames():
+    ok = _summary(skip_first_frames=1)
+    md = render_markdown({"run_id": "r1", "clips": [ok], "environment": {}})
+    assert "开头若干帧只从统计口径中排除" in md
+    assert "1 帧" in md
+
+
+def test_render_markdown_omits_note_without_skip():
+    ok = _summary()
+    md = render_markdown({"run_id": "r1", "clips": [ok], "environment": {}})
+    assert "开头若干帧只从统计口径中排除" not in md
+
+
 def test_render_failure_mentions_attempts_and_no_fallback():
     text = render_failure(
         {"name": "clip.mp4", "codec": "av1"},

@@ -36,11 +36,11 @@ def test_mean_and_stdev():
 def test_jitter_is_median_of_absolute_differences():
     # 差值：10, 10, 1000 ns -> 中位数 10 ns -> 10e-6 ms
     samples = [0, 10, 20, 1020]
-    assert stats.jitter_ms(samples) == pytest.approx(10 / 1e6)
-    assert stats.jitter_ms([1]) == 0.0
-    assert stats.jitter_ms([]) == 0.0
+    assert stats.jitter_ns_to_ms(samples) == pytest.approx(10 / 1e6)
+    assert stats.jitter_ns_to_ms([1]) == 0.0
+    assert stats.jitter_ns_to_ms([]) == 0.0
     # 抖动是「毫秒」：1000 ns 的中位差 = 0.001 ms
-    assert stats.jitter_ms([1_000, 2_000, 3_000]) == pytest.approx(0.001)
+    assert stats.jitter_ns_to_ms([1_000, 2_000, 3_000]) == pytest.approx(0.001)
 
 
 def test_realtime_factor():
@@ -62,17 +62,18 @@ def test_summarize_units_and_percentiles():
     s = stats.summarize(samples)
     assert s.count == 5
     assert s.total_ns == 20_000
-    assert s.mean_us == pytest.approx(4.0)
-    assert s.median_us == pytest.approx(3.0)
-    assert s.min_us == pytest.approx(1.0)
-    assert s.max_us == pytest.approx(10.0)
-    assert s.p95_us == pytest.approx(8.8)
+    # 对外单位是毫秒：1000 ns = 0.001 ms
+    assert s.mean_ms == pytest.approx(0.004)
+    assert s.median_ms == pytest.approx(0.003)
+    assert s.min_ms == pytest.approx(0.001)
+    assert s.max_ms == pytest.approx(0.010)
+    assert s.p95_ms == pytest.approx(0.0088)
     # 相邻差值 1000 ns -> 中位数 1 µs = 0.001 ms
-    assert s.jitter_us == pytest.approx(0.001)
+    assert s.jitter_ms == pytest.approx(0.001)
 
     payload = s.as_dict()
     assert payload["count"] == 5
-    assert payload["total_us"] == pytest.approx(20.0)
+    assert payload["total_ms"] == pytest.approx(0.020)
 
 
 def test_summarize_keeps_samples_optional():
@@ -84,4 +85,4 @@ def test_summarize_keeps_samples_optional():
 def test_summarize_empty():
     s = stats.summarize([])
     assert s.count == 0
-    assert math.isnan(s.mean_us)
+    assert math.isnan(s.mean_ms)

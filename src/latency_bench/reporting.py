@@ -471,19 +471,19 @@ def render_markdown(payload: dict[str, Any]) -> str:
             lines.append("## 偏慢的帧（> 5 ms）")
             lines.append("")
             lines.append(
-                "| 片段 | 数量 | 首个 | 最大 µs | 相邻间隔中位数（帧） | 判定 |"
+                "| 片段 | 数量 | 首个 | 最大 ms | 相邻间隔中位数（帧） | 判定 |"
             )
             lines.append("|---|---|---|---|---|---|")
             for c, s in slow_rows:
                 gap = s.get("median_gap_frames")
                 periodic = bool(gap) and s["count"] >= 3
                 lines.append(
-                    "| {clip} | {n} | 第 {first} 帧（{fus} µs） | {mx} | {gap} | {verdict} |".format(
+                    "| {clip} | {n} | 第 {first} 帧（{fms} ms） | {mx} | {gap} | {verdict} |".format(
                         clip=c.get("clip", "—"),
                         n=s["count"],
                         first=s["first_index"],
-                        fus=_fmt(s["first_us"], 1),
-                        mx=_fmt(s["max_us"], 1),
+                        fms=_fmt(s["first_ms"], 3),
+                        mx=_fmt(s["max_ms"], 3),
                         gap=_fmt(gap, 1),
                         verdict="疑似周期性（见 README 已知现象）" if periodic else "偶发",
                     )
@@ -493,9 +493,20 @@ def render_markdown(payload: dict[str, Any]) -> str:
     lines.append("## 口径说明")
     lines.append("")
     lines.append(
-        "- `decode_us` 是**每 packet** 交给 libavcodec 的耗时（`send_packet` + 取帧），"
+        "- `decode_ms` 是**每 packet** 交给 libavcodec 的耗时（`send_packet` + 取帧），"
         "不含 demux、不含 CPU 回读。"
     )
+    skipped = [c for c in clips if c.get("skipped_first_frames")]
+    if skipped:
+        detail = "、".join(
+            f"{c.get('clip')} {c['skipped_first_frames']} 帧" for c in skipped
+        )
+        lines.append(
+            f"- **开头若干帧只从统计口径中排除**（含解码器初始化开销的第 0 帧）：{detail}。"
+            "这些帧照常解码、照常写进 `frames.csv`、照常计入 `frame_count`，"
+            "但不参与均值/分位数/抖动/实时倍率，也不出现在「偏慢的帧」里（"
+            "因此 `decode.count` 会比 `frame_count` 少）。"
+        )
     lines.append("- `p50/p95/p99` 用线性插值分位数；`抖动` 是相邻样本绝对差的中位数。")
     lines.append(
         "- `实时倍率 = (帧数 / 平均帧率) / 解码墙钟`；变帧率素材按平均帧率折算，"
@@ -534,26 +545,38 @@ def summarize_ticks(rows: list[TickRow], interval_ms: float, wall_ms: float) -> 
 
 
 def slow_frame_report(
-    samples: list[FrameSample], threshold_us: float = 5000.0
+    samples: list[FrameSample],
+    threshold_ms: float = 5.0,
+    *,
+    index_offset: int = 0,
 ) -> dict[str, Any] | None:
     """挑出明显偏慢的帧并给出它们的间隔中位数。
 
     本机实测到某类「周期性慢帧」现象（见 README「已知现象」），
     把间隔中位数一起记下来，读者一眼就能判断它是周期性的还是随机的。
+
+    :param index_offset: 给帧号加的回填量，用于 ``samples`` 里的 ``index``
+        不携带全局帧号（例如全为 0）的场合；正常调用传 0 即可，
+        此时直接用 ``FrameSample.index``，报出的就是与 ``frames.csv``
+        一致的原始帧号。
     """
-    slow = [(s.index, s.decode_us) for s in samples if s.decode_us > threshold_us]
+    slow = [
+        (s.index + index_offset, s.decode_ms)
+        for s in samples
+        if s.decode_ms > threshold_ms
+    ]
     if not slow:
         return None
     gaps = [b[0] - a[0] for a, b in zip(slow, slow[1:])]
     return {
-        "threshold_us": threshold_us,
+        "threshold_ms": threshold_ms,
         "count": len(slow),
         "indices": [i for i, _ in slow][:64],
         "gaps": gaps[:64],
         "median_gap_frames": stats.percentile(sorted(gaps), 50.0) if gaps else None,
         "first_index": slow[0][0],
-        "first_us": slow[0][1],
-        "max_us": max(v for _, v in slow),
+        "first_ms": slow[0][1],
+        "max_ms": max(v for _, v in slow),
     }
 
 
@@ -575,11 +598,25 @@ def build_clip_summary(
     stop_reason: str | None = None,
     expected_frames: int | None = None,
     backend: dict[str, Any] | None = None,
+    skip_first_frames: int = 0,
 ) -> dict[str, Any]:
-    """组装单个片段的 ``<clip>__<hwaccel>.summary.json`` 内容。"""
+    """组装单个片段的 ``<clip>__<hwaccel>.summary.json`` 内容。
+
+    ``skip_first_frames`` 只在**统计口径**上生效：开头 N 个帧不参与
+    均值/分位数/抖动/实时倍率，也不出现在「偏慢的帧」里；它们照样写进
+    ``frames.csv``、照样计入 ``frame_count``。因此当 N>0 时
+    ``decode.count`` 会比 ``frame_count`` 少 N。
+    """
     decode_ns = [s.decode_ns for s in samples]
     per_frame_ns = [s.decode_ns / max(1, s.frames_out) for s in samples]
     demux_ns = [s.demux_ns for s in samples]
+
+    # 统计口径：丢掉开头 N 帧（通常是带解码器初始化开销的第 0 帧）。
+    skipped = min(max(0, skip_first_frames), len(samples))
+    stat_samples = samples[skipped:]
+    stat_decode_ns = decode_ns[skipped:]
+    stat_per_frame_ns = per_frame_ns[skipped:]
+    stat_demux_ns = demux_ns[skipped:]
 
     fps = stats.average_frame_rate(
         frames_total,
@@ -613,6 +650,7 @@ def build_clip_summary(
         "hw_pix_fmts": hw_pix_fmts,
         "packets_total": packets_total,
         "frame_count": frames_total,
+        "skipped_first_frames": skipped,
         "tail_frames": tail_frames,
         "keyframe_count": keyframe_count,
         "stop_reason": stop_reason,
@@ -621,13 +659,13 @@ def build_clip_summary(
         "throughput_fps": (frames_total / wall_s) if wall_s > 0 else float("nan"),
         "average_frame_rate": fps,
         "realtime_factor": stats.realtime_factor(frames_total, wall_s, fps),
-        "decode": stats.summarize(decode_ns).as_dict(),
-        "decode_per_frame_us": {
-            **stats.summarize(per_frame_ns).as_dict(),
-            "note": "= decode_us / frames_out",
+        "decode": stats.summarize(stat_decode_ns).as_dict(),
+        "decode_per_frame_ms": {
+            **stats.summarize(stat_per_frame_ns).as_dict(),
+            "note": "= decode_ms / frames_out",
         },
-        "demux": stats.summarize(demux_ns).as_dict(),
-        "slow_frames": slow_frame_report(samples),
+        "demux": stats.summarize(stat_demux_ns).as_dict(),
+        "slow_frames": slow_frame_report(stat_samples),
         "ticks": ticks,
         "attempts": [
             {"hwaccel": a.hwaccel, "decoder": a.decoder, "error": a.error} for a in attempts

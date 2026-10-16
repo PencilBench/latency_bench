@@ -14,7 +14,7 @@ __all__ = [
     "percentile",
     "mean",
     "stdev",
-    "jitter_ms",
+    "jitter_ns_to_ms",
     "summarize",
     "DecodeSummary",
     "realtime_factor",
@@ -65,8 +65,8 @@ def stdev(values: Sequence[float], *, sample: bool = True) -> float:
     return math.sqrt(acc / denom)
 
 
-def jitter_ms(values_ns: Sequence[float]) -> float:
-    """抖动：相邻样本绝对差的中位数。
+def jitter_ns_to_ms(values_ns: Sequence[float]) -> float:
+    """抖动：相邻样本绝对差的中位数，纳秒输入 → **毫秒**输出。
 
     用中位数而不是平均数，避免单次调度抖动（GC、缺页）把整段统计拉歪。
     :param values_ns: 以**纳秒**为单位的样本序列（按解码先后顺序，不排序）。
@@ -112,37 +112,37 @@ def average_frame_rate(
 
 @dataclass
 class DecodeSummary:
-    """一组解码耗时样本（纳秒）的汇总统计，对外单位为微秒。"""
+    """一组解码耗时样本（纳秒）的汇总统计，对外单位为**毫秒**。"""
 
     count: int = 0
     total_ns: int = 0
-    mean_us: float = float("nan")
-    median_us: float = float("nan")
-    p95_us: float = float("nan")
-    p99_us: float = float("nan")
-    min_us: float = float("nan")
-    max_us: float = float("nan")
-    stdev_us: float = float("nan")
-    jitter_us: float = 0.0
+    mean_ms: float = float("nan")
+    median_ms: float = float("nan")
+    p95_ms: float = float("nan")
+    p99_ms: float = float("nan")
+    min_ms: float = float("nan")
+    max_ms: float = float("nan")
+    stdev_ms: float = float("nan")
+    jitter_ms: float = 0.0
     samples_ns: list[int] = field(default_factory=list)
 
     def as_dict(self) -> dict[str, float | int]:
         return {
             "count": self.count,
-            "total_us": self.total_ns / 1e3,
-            "mean_us": self.mean_us,
-            "median_us": self.median_us,
-            "p95_us": self.p95_us,
-            "p99_us": self.p99_us,
-            "min_us": self.min_us,
-            "max_us": self.max_us,
-            "stdev_us": self.stdev_us,
-            "jitter_us": self.jitter_us,
+            "total_ms": self.total_ns / 1e6,
+            "mean_ms": self.mean_ms,
+            "median_ms": self.median_ms,
+            "p95_ms": self.p95_ms,
+            "p99_ms": self.p99_ms,
+            "min_ms": self.min_ms,
+            "max_ms": self.max_ms,
+            "stdev_ms": self.stdev_ms,
+            "jitter_ms": self.jitter_ms,
         }
 
 
 def summarize(samples_ns: Iterable[float], *, keep_samples: bool = False) -> DecodeSummary:
-    """把纳秒样本汇成 :class:`DecodeSummary`。"""
+    """把纳秒样本汇成 :class:`DecodeSummary`（对外毫秒）。"""
     values = [float(v) for v in samples_ns]
     if not values:
         return DecodeSummary()
@@ -151,14 +151,14 @@ def summarize(samples_ns: Iterable[float], *, keep_samples: bool = False) -> Dec
     s = DecodeSummary(
         count=len(values),
         total_ns=int(math.fsum(values)),
-        mean_us=mean(values) / 1e3,
-        median_us=percentile(ordered, 50.0) / 1e3,
-        p95_us=percentile(ordered, 95.0) / 1e3,
-        p99_us=percentile(ordered, 99.0) / 1e3,
-        min_us=ordered[0] / 1e3,
-        max_us=ordered[-1] / 1e3,
-        stdev_us=stdev(values) / 1e3,
-        jitter_us=jitter_ms(values),
+        mean_ms=mean(values) / 1e6,
+        median_ms=percentile(ordered, 50.0) / 1e6,
+        p95_ms=percentile(ordered, 95.0) / 1e6,
+        p99_ms=percentile(ordered, 99.0) / 1e6,
+        min_ms=ordered[0] / 1e6,
+        max_ms=ordered[-1] / 1e6,
+        stdev_ms=stdev(values) / 1e6,
+        jitter_ms=jitter_ns_to_ms(values),
     )
     if keep_samples:
         s.samples_ns = [int(v) for v in values]

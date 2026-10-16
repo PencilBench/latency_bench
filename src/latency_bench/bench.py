@@ -439,9 +439,17 @@ def run_clip(
     max_frames: int | None = None,
     max_wall_s: float | None = None,
     thread_count: int = 1,
+    skip_first_frames: int = 1,
     on_tick: Any = None,
 ) -> ClipRunResult:
-    """完整跑一个片段：探测 → 解码计时 → 33 ms tick → 写 CSV/JSON。"""
+    """完整跑一个片段：探测 → 解码计时 → 33 ms tick → 写 CSV/JSON。
+
+    :param skip_first_frames: **只在统计口径上**把开头 N 个帧排除（默认 1，
+        即排除第 0 帧）。解码流程本身完全不变：帧照解、CSV 照写、帧数照记，
+        只是这些帧不参与均值/分位数/抖动/实时倍率。第 0 帧带着解码器初始化
+        开销（实测 18~26 ms，稳态均值只有 1~6 ms），留在统计里会把 p99/max
+        显著抬高。
+    """
     outcome = probe_plan(
         path,
         hwaccel=hwaccel,
@@ -662,6 +670,7 @@ def run_clip(
         ),
         expected_frames=expected_frames,
         backend=backend_info,
+        skip_first_frames=skip_first_frames,
     )
     summary["sample_trimmed"] = sink.trimmed
     return ClipRunResult(

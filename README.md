@@ -18,6 +18,8 @@ foundation-sunshine clip recorder（`F9+F10` 热键、`ffmpeg -c copy` 封装）
 > AV1 + D3D11VA 在 PyAV 官方 wheel 上跑不通（PyAV 会选中不带 hwaccel 的
 > `libdav1d`）。本工具用一个 **ctypes FFmpeg 后端**绕开它，详见
 > [为什么需要 ctypes 后端](#为什么-av1-需要-ctypes-后端)。
+> macOS 的 **AV1 + VideoToolbox 同样需要这个后端**（PyAV 会给原生 `av1`
+> 预设 `pix_fmt` 导致 `EINVAL`）。
 
 ---
 
@@ -69,6 +71,7 @@ python -m latency_bench [选项]
 | `--allow-software-fallback` | 关 | 允许软解回退。打开后结果不再代表硬解延迟 |
 | `--repeat` | 1 | 每片段重复次数（取 p99 更优的一轮） |
 | `--warmup` | 0 | 先把片段跑 N 次不计入统计（预热系统缓存） |
+| `--skip-first-frames` | **1** | **只在统计口径上**排除开头 N 个帧（排除含解码器初始化开销的第 0 帧）；帧照常解码与写 CSV，填 `0` 关闭 |
 | `--tick-ms` | 33 | tick 周期 |
 | `--fsync` | 关 | 每次 tick 额外 `fsync`（更慢更稳） |
 | `--max-frames` | 整段 | 每片段最多解码 N 帧（冒烟用） |
@@ -257,12 +260,23 @@ Windows 上 `threading.Event.wait(0.033)` 的实测唤醒延迟约 **14 ms**（�
 tick 拖成 47 ms）。因此 ticker 采用「`time.sleep` 到截止前 2 ms + 忙等收尾」，
 本机实测 tick 间隔中位数 **33.000 ms**、漂移 < 0.1 ms。
 
-### 4. ctypes 后端当前只实现 Windows 路径
+### 4. ctypes 后端：Windows + macOS 两条路径
 
-`ffmpeg_ctypes` 目前只加载 `.dll` 并只处理 `d3d11va` / `d3d12va` 组合。
-macOS 的 VideoToolbox 路径仍走 PyAV（`videotoolbox` + 原生 `av1`），
-但**未在真机验证过** —— 如果在 Mac 上 AV1 也遇到同样问题，
-可以照 `ffmpeg_ctypes.py` 的思路加一个 `.dylib` 分支。
+`ffmpeg_ctypes` 按平台加载 `.dll`（Windows）或 `.dylib`（macOS），并处理这样的组合：
+
+| 平台 | 设备类型 | 走 ctypes 后端的组合 | 其余 |
+|---|---|---|---|
+| Windows | `d3d11va` | AV1（`av1` / `av1_d3d11va`） | PyAV |
+| macOS | `videotoolbox` | AV1（原生 `av1`） | PyAV |
+
+macOS 侧已在本机（Apple M6）验证：AV1 1080p 出帧格式 `videotoolbox_vld`，
+301 packets → 301 帧、0.42 s；4K 与 1080p 两个 AV1 片段均 `hw_ok=yes`、
+无回读。HEVC 仍走 PyAV（原生 `hevc` 本来就带 `videotoolbox`）。
+
+> **`AVERROR(EAGAIN)` 是平台相关的**：它是 `-EAGAIN`，而 `EAGAIN` 在
+> Linux/Windows 上是 11、在 macOS（BSD errno）上是 **35**。`ffmpeg_ctypes.EAGAIN_ERRNO`
+> 按平台取值；写死 `-11` 会把 macOS 上「解码器暂时没有输出帧」这一正常情况
+> 当成致命错误（实测 `avcodec_receive_frame()` 在 VideoToolbox 上返回 `-35`）。
 
 ### 5. 其它
 
