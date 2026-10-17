@@ -211,8 +211,8 @@ def main() -> None:
 
     T(40, 22, "解码延迟对比：" + " vs ".join(r["label"] for r in runs), 21, bold=True)
 
-    T(1063, top - 30, "p50", 11, (107, 114, 128), "lm", bold=True)
-    T(1146, top - 30, "max", 11, (107, 114, 128), "lm", bold=True)
+    T(1063, top - 30, "均值", 11, (107, 114, 128), "lm", bold=True)
+    T(1146, top - 30, "p99", 11, (107, 114, 128), "lm", bold=True)
 
     for gv in [0.05, 0.1, 0.2, 0.5, 1, 2, 5, 10, 20, 50]:
         if not (V_MIN <= gv <= V_MAX):
@@ -238,8 +238,8 @@ def main() -> None:
                 ln((X(d["p95_ms"]), y - 5, X(d["p95_ms"]), y + 5), col + (170,), 1.4)
             dot(X(d["max_ms"]), y, 2.8, outline=col, ow=1.3)
             dot(X(d["mean_ms"]), y, 3.4, fill="white", outline=col, ow=1.7)
-            T(1070, y, f"{d['median_ms']:.2f}{'*' if polluted else ''}", 10, col, "lm", bold=True)
-            T(1153, y, f"{d['max_ms']:.2f}", 10, col, "lm", bold=True)
+            T(1070, y, f"{d['mean_ms']:.2f}", 10, col, "lm", bold=True)
+            T(1153, y, f"{d['p99_ms']:.2f}{'*' if polluted else ''}", 10, col, "lm", bold=True)
         # 左侧的短标签（首字母/序号，颜色对应图例）
         for j, run in enumerate(runs):
             T(left - 18, y0 + 18 + j * step, chr(ord("A") + j), 10, run["color"], "ra", bold=True)
