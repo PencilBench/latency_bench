@@ -142,6 +142,37 @@ results/<run_id>/
 
 ---
 
+## 分析脚本
+
+仓库根目录下三个只读的分析脚本（都只读已跑完的结果目录，不重新解码）。
+逐帧 CSV 的定位顺序统一是 `summary.json` 的 `round.frames_csv`
+→ 旧命名 `<clip>__<hwaccel>.frames.csv`，因此**新老结果目录都能直接分析**。
+
+```bash
+# 两次运行的逐片段对比（自相关周期、尾部尖峰、ticker 健康度、有效吞吐…）
+python analyze_compare.py --a results/<runA> --b results/<runB> \
+    --label-a "Apple M6" --label-b "Intel Arc B390"
+
+# 对比图（PNG）
+python make_chart.py --a results/<runA>/summary.json --b results/<runB>/summary.json \
+    --label-a "Apple M6" --label-b "Intel Arc B390" -o compare.png
+
+# 按 CSV 重算 summary（修正旧目录的口径，或校验新目录的 CSV 与汇总同轮）
+python rebuild_round4_summary.py --check --run results/<runA> --run results/<runB>
+python rebuild_round4_summary.py --write --run results/<runA>   # 写盘前先备份
+```
+
+`rebuild_round4_summary.py` 复用工具自己的 `FrameSample` / `summarize_ticks` /
+`build_clip_summary` / `render_markdown`，所以重算口径与工具逐位一致：
+在新布局目录上 `--check` 应当**全部显示「同轮」且各项差异为 0**。
+
+> 注意：`wall_s` 无法从 CSV 精确恢复（CSV 不存墙钟），重算时用「全部帧的
+> `demux_ms + decode_ms` 之和」估计并用 ticker 的物理边界收口，误差 < 0.5%。
+> 因此 `wall_s` / `throughput_fps` / `realtime_factor` 是派生量，
+> 而 `decode` / `demux` / `slow_frames` / `ticks` 是精确值。
+
+---
+
 ## 结果解读
 
 * **`decode_ms`** 是稳态下**每 packet** 的解码耗时。PyAV 没有
