@@ -378,11 +378,12 @@ def test_run_writer_writes_all_artifacts(work_dir: Path):
         environment={"platform": "Windows"},
         started_at="now",
     )
-    frame_fh, frame_writer = writer.clip_frame_writer("clip", "d3d11va")
+    ctx = reporting.RoundContext(index=2, total=4, warmup=2, counted=2)
+    frame_fh, frame_writer = writer.clip_frame_writer("clip", "d3d11va", ctx)
     frame_writer.writerow(_sample(0).as_row())
     frame_fh.close()
 
-    tick_fh, tick_writer = writer.clip_tick_writer("clip", "d3d11va")
+    tick_fh, tick_writer = writer.clip_tick_writer("clip", "d3d11va", ctx)
     tick_writer.writerow(
         TickRow(0, 33.0, "iso", 1, 1, 1, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 30.0, 1.0, 33.0, 0.0).as_row()
     )
@@ -392,17 +393,77 @@ def test_run_writer_writes_all_artifacts(work_dir: Path):
     writer.write_inventory({"clips": []})
     json_path, md_path = writer.write_summary(extra={"hwaccel": "d3d11va"})
 
-    assert (work_dir / "run" / "clip__d3d11va.frames.csv").exists()
-    assert (work_dir / "run" / "clip__d3d11va.ticks.csv").exists()
+    assert (work_dir / "run" / "clip__d3d11va.r3.frames.csv").exists()
+    assert (work_dir / "run" / "clip__d3d11va.r3.ticks.csv").exists()
     assert (work_dir / "run" / "clip__d3d11va.summary.json").exists()
     assert (work_dir / "run" / "inventory.json").exists()
     assert json_path.exists() and md_path.exists()
 
-    header = (work_dir / "run" / "clip__d3d11va.ticks.csv").read_text("utf-8").splitlines()[0]
+    header = (work_dir / "run" / "clip__d3d11va.r3.ticks.csv").read_text("utf-8").splitlines()[0]
     assert header.split(",") == reporting.TICK_COLUMNS
     payload = json.loads(json_path.read_text("utf-8"))
     assert payload["hwaccel"] == "d3d11va"
     assert len(payload["clips"]) == 1
+
+
+def test_round_context_names_and_tags():
+    """轮次标签既是文件名中缀，也写进 summary 的 round 字段。"""
+    # 默认：单轮 r1
+    plain = reporting.RoundContext()
+    assert plain.number == 1
+    assert plain.file_tag() == "r1"
+    assert plain.is_warmup is False
+
+    warm = reporting.RoundContext(index=1, total=4, warmup=2, counted=2)
+    assert warm.number == 2 and warm.file_tag() == "r2" and warm.is_warmup is True
+
+    last = reporting.RoundContext(index=3, total=4, warmup=2, counted=2)
+    assert last.file_tag() == "r4" and last.is_warmup is False
+    meta = last.metadata(frames_csv="clip__d3d11va.r4.frames.csv",
+                         ticks_csv="clip__d3d11va.r4.ticks.csv")
+    assert meta["file_tag"] == "r4" and meta["number"] == 4 and meta["index"] == 3
+    assert meta["total_runs"] == 4 and meta["warmup_runs"] == 2 and meta["counted_runs"] == 2
+    assert meta["frames_csv"].endswith(".r4.frames.csv")
+
+    with pytest.raises(ValueError):
+        reporting.round_file_tag(0)
+
+
+def test_csv_paths_carry_round_tag(work_dir: Path):
+    """同一片段的不同轮必须落到不同文件，否则旧行为会互相覆盖。"""
+    writer = reporting.RunWriter(
+        out_dir=work_dir / "run", run_id="x", command="c", environment={}, started_at="now"
+    )
+    seen = set()
+    for i in range(4):
+        ctx = reporting.RoundContext(index=i, total=4, warmup=2, counted=2)
+        p = writer.clip_frames_path("clip", "d3d11va", ctx)
+        q = writer.clip_ticks_path("clip", "d3d11va", ctx)
+        assert p.name == f"clip__d3d11va.r{i + 1}.frames.csv"
+        assert q.name == f"clip__d3d11va.r{i + 1}.ticks.csv"
+        seen.add(p.name)
+    assert len(seen) == 4
+
+
+def test_build_clip_summary_records_round():
+    """summary 必须自报 CSV 文件名，读取方不必猜命名规则。"""
+    ctx = reporting.RoundContext(index=3, total=4, warmup=2, counted=2)
+    summary = reporting.build_clip_summary(
+        clip={"name": "clip.mp4", "duration_s": 1.0, "avg_frame_rate": 60.0},
+        plan=DecodePlan(hwaccel="d3d11va", decoder="hevc"),
+        attempts=[],
+        samples=[_sample(i) for i in range(4)],
+        frames_total=4,
+        packets_total=4,
+        wall_s=1.0,
+        hardware_confirmed=True,
+        readback_detected=False,
+        hw_pix_fmts=["d3d11"],
+        ticks={},
+        round_info=ctx.metadata("clip__d3d11va.r4.frames.csv", "clip__d3d11va.r4.ticks.csv"),
+    )
+    assert summary["round"]["file_tag"] == "r4"
+    assert summary["round"]["frames_csv"] == "clip__d3d11va.r4.frames.csv"
 
 
 def test_json_output_replaces_nan_with_null():

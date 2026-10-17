@@ -24,16 +24,76 @@ from .accel import DecodePlan, PlanAttempt, format_attempts
 __all__ = [
     "FrameSample",
     "TickRow",
+    "RoundContext",
     "SampleSink",
     "Ticker",
     "RunWriter",
     "TICK_COLUMNS",
     "FRAME_COLUMNS",
+    "round_file_tag",
     "summarize_ticks",
     "build_clip_summary",
     "render_markdown",
     "render_failure",
 ]
+
+
+def round_file_tag(round_number: int) -> str:
+    """轮次文件标签：1 基的 ``r1`` / ``r2`` ...（与 summary 里的 ``round.number`` 一致）。"""
+    if round_number < 1:
+        raise ValueError(f"round_number 必须 >= 1，收到 {round_number!r}")
+    return f"r{round_number}"
+
+
+@dataclass(slots=True)
+class RoundContext:
+    """「这是第几轮」——决定 CSV 文件名，并原样写进 summary。
+
+    之所以需要它：``--warmup``/``--repeat`` 会把同一个片段跑多轮，每轮都写一份
+    CSV。如果所有轮共用同一个文件名（旧行为），盘上只会留下**最后一轮**，而
+    summary 可能报告**另一轮**（``_better()`` 取 p99 更优的一轮），两者对不上。
+    按轮命名后，summary 里记的 ``round.file_tag`` 直接指向它自己那一轮的 CSV。
+    """
+
+    index: int = 0
+    """0 基轮序号。"""
+    total: int = 1
+    """本次运行对同一片段的总轮数（warmup + repeat）。"""
+    warmup: int = 0
+    """其中预热轮数。"""
+    counted: int = 1
+    """其中计入统计的轮数。"""
+
+    @property
+    def number(self) -> int:
+        """1 基轮序号，用于文件名与 ``round.number``。"""
+        return self.index + 1
+
+    @property
+    def is_warmup(self) -> bool:
+        return self.index < self.warmup
+
+    def file_tag(self) -> str:
+        return round_file_tag(self.number)
+
+    def metadata(self, frames_csv: str, ticks_csv: str) -> dict[str, Any]:
+        """写进 ``<clip>__<hwaccel>.summary.json`` 的 ``round`` 字段。
+
+        ``frames_csv`` / ``ticks_csv`` 是**权威指针**：summary 说的就是这两个文件，
+        读汇总的人不必再去猜文件名规则。
+        """
+        return {
+            "file_tag": self.file_tag(),
+            "number": self.number,
+            "index": self.index,
+            "is_warmup": self.is_warmup,
+            "total_runs": self.total,
+            "warmup_runs": self.warmup,
+            "counted_runs": self.counted,
+            "frames_csv": frames_csv,
+            "ticks_csv": ticks_csv,
+        }
+
 
 FRAME_COLUMNS = [
     "index",
@@ -309,15 +369,28 @@ class RunWriter:
         self.out_dir.mkdir(parents=True, exist_ok=True)
 
     # -- 单个片段 --------------------------------------------------------------
-    def clip_frame_writer(self, clip_stem: str, hwaccel: str) -> tuple[TextIO, Any]:
-        path = self.out_dir / f"{clip_stem}__{hwaccel}.frames.csv"
+    #: 每次运行（含预热轮）各写一份 CSV，文件名带 ``.r<N>`` 轮次中缀。这样
+    #: summary 里的 ``round.frames_csv`` 一定指向它自己那一轮，不会再出现
+    #: 「汇总来自第 3/4 轮里较优的一轮、而盘上只剩最后一轮」的错配。
+    def clip_frames_path(self, clip_stem: str, hwaccel: str, ctx: RoundContext) -> Path:
+        return self.out_dir / f"{clip_stem}__{hwaccel}.{ctx.file_tag()}.frames.csv"
+
+    def clip_ticks_path(self, clip_stem: str, hwaccel: str, ctx: RoundContext) -> Path:
+        return self.out_dir / f"{clip_stem}__{hwaccel}.{ctx.file_tag()}.ticks.csv"
+
+    def clip_frame_writer(
+        self, clip_stem: str, hwaccel: str, ctx: RoundContext
+    ) -> tuple[TextIO, Any]:
+        path = self.clip_frames_path(clip_stem, hwaccel, ctx)
         fh = path.open("w", newline="", encoding="utf-8")
         writer = csv.writer(fh)
         writer.writerow(FRAME_COLUMNS)
         return fh, writer
 
-    def clip_tick_writer(self, clip_stem: str, hwaccel: str) -> tuple[TextIO, Any]:
-        path = self.out_dir / f"{clip_stem}__{hwaccel}.ticks.csv"
+    def clip_tick_writer(
+        self, clip_stem: str, hwaccel: str, ctx: RoundContext
+    ) -> tuple[TextIO, Any]:
+        path = self.clip_ticks_path(clip_stem, hwaccel, ctx)
         fh = path.open("w", newline="", encoding="utf-8")
         writer = csv.writer(fh)
         writer.writerow(TICK_COLUMNS)
@@ -378,6 +451,41 @@ def _fmt(value: Any, digits: int = 2) -> str:
     return str(value)
 
 
+def _round_cell(clip: dict[str, Any]) -> str:
+    """逐片段表里的「轮次」单元格：``r3``（预热轮加 ``(预热)``）。"""
+    rnd = clip.get("round") or {}
+    tag = rnd.get("file_tag")
+    if not tag:
+        return "—"
+    if rnd.get("selected"):
+        tag = f"**{tag}**"
+    if rnd.get("is_warmup"):
+        tag = f"{tag}（预热）"
+    return tag
+
+
+def _round_policy_summary(clips: list[dict[str, Any]]) -> str:
+    """说明 summary 与 CSV 的对应关系，避免再次出现「汇总与 CSV 不同轮」的误读。"""
+    tagged = [c for c in clips if (c.get("round") or {}).get("file_tag")]
+    if not tagged:
+        return ""
+    rnd = tagged[0]["round"]
+    total = rnd.get("total_runs")
+    warmup = rnd.get("warmup_runs")
+    counted = rnd.get("counted_runs")
+    if counted and total and counted < total:
+        policy = "各轮 CSV 按轮次分别落盘（`.r1`/`.r2`/…）；下表取**计入轮中 p99 更优的一轮**"
+        chosen = sorted({(c.get("round") or {}).get("file_tag") for c in tagged})
+        policy += f"，各片段选中的轮次见「轮次」列（本次出现：{', '.join(chosen)}）"
+    else:
+        policy = "单轮运行；CSV 与下表同轮"
+    if total:
+        policy += f"。共 {total} 轮（预热 {warmup} + 计入 {counted}）"
+        if warmup:
+            policy += "，预热轮的 CSV 也保留（文件名带 `.r*`），但不参与统计"
+    return policy + "。"
+
+
 def render_markdown(payload: dict[str, Any]) -> str:
     """把汇总渲染成可贴进 issue / 文档的对比表。"""
     lines: list[str] = []
@@ -389,6 +497,9 @@ def render_markdown(payload: dict[str, Any]) -> str:
     lines.append(f"- 平台：{env.get('platform', '—')}（{env.get('machine', '—')}）")
     lines.append(f"- Python {env.get('python', '—')} / PyAV {env.get('pyav', '—')}")
     lines.append(f"- 可用硬件设备类型：{', '.join(env.get('hwdevices_available', []) or []) or '—'}")
+    rounds = _round_policy_summary(payload.get("clips") or [])
+    if rounds:
+        lines.append(f"- 统计口径：{rounds}")
     lines.append("")
 
     clips = payload.get("clips") or []
@@ -396,14 +507,14 @@ def render_markdown(payload: dict[str, Any]) -> str:
         lines.append("## 逐片段对比")
         lines.append("")
         lines.append(
-            "| 片段 | Codec | 分辨率 | Mbps | hwaccel | 解码器 | 硬解 | 回读 | "
+            "| 片段 | 轮次 | Codec | 分辨率 | Mbps | hwaccel | 解码器 | 硬解 | 回读 | "
             "帧数 | 均值 ms | p50 ms | p95 ms | p99 ms | max ms | 抖动 ms | 实时倍率 |"
         )
-        lines.append("|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|")
+        lines.append("|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|")
         for c in clips:
             if c.get("error"):
                 lines.append(
-                    f"| {c.get('clip')} | — | — | — | {c.get('hwaccel', '—')} | — | **失败** |"
+                    f"| {c.get('clip')} | — | — | — | — | {c.get('hwaccel', '—')} | — | **失败** |"
                     " — | — | — | — | — | — | — | — | — |"
                 )
                 continue
@@ -413,9 +524,10 @@ def render_markdown(payload: dict[str, Any]) -> str:
             raw_rate = src.get("bit_rate")
             mbps = (raw_rate / 1e6) if isinstance(raw_rate, (int, float)) and raw_rate else None
             lines.append(
-                "| {clip} | {codec} | {w}x{h} | {mbps} | {hw} | {decoder} | {hw_ok} | {readback} | "
+                "| {clip} | {round} | {codec} | {w}x{h} | {mbps} | {hw} | {decoder} | {hw_ok} | {readback} | "
                 "{frames} | {mean} | {p50} | {p95} | {p99} | {mx} | {jit} | {rt} |".format(
                     clip=c.get("clip", "—"),
+                    round=_round_cell(c),
                     codec=src.get("codec", "—"),
                     w=src.get("width", "—"),
                     h=src.get("height", "—"),
@@ -599,6 +711,7 @@ def build_clip_summary(
     expected_frames: int | None = None,
     backend: dict[str, Any] | None = None,
     skip_first_frames: int = 0,
+    round_info: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """组装单个片段的 ``<clip>__<hwaccel>.summary.json`` 内容。
 
@@ -606,6 +719,9 @@ def build_clip_summary(
     均值/分位数/抖动/实时倍率，也不出现在「偏慢的帧」里；它们照样写进
     ``frames.csv``、照样计入 ``frame_count``。因此当 N>0 时
     ``decode.count`` 会比 ``frame_count`` 少 N。
+
+    ``round_info`` 由 :meth:`RoundContext.metadata` 产出，记录本轮 CSV 的文件名，
+    保证 summary 与 ``frames.csv`` / ``ticks.csv`` 指向同一轮。
     """
     decode_ns = [s.decode_ns for s in samples]
     per_frame_ns = [s.decode_ns / max(1, s.frames_out) for s in samples]
@@ -629,6 +745,7 @@ def build_clip_summary(
         "hwaccel": plan.hwaccel,
         "decoder": plan.decoder,
         "backend": backend,
+        "round": round_info,
         "hwaccel_owned": True,
         "allow_software_fallback": plan.allow_software_fallback,
         "source": {

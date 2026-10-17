@@ -69,7 +69,7 @@ python -m latency_bench [选项]
 | `--decoder` | `auto` | `auto` 按平台优先级选原生解码器；也可强制指定解码器名 |
 | `--allow-alt-hwaccel` | 关 | 允许备选设备类型（Windows: `cuda`）。**非 Moonlight 路径**，仅供开发机验证 |
 | `--allow-software-fallback` | 关 | 允许软解回退。打开后结果不再代表硬解延迟 |
-| `--repeat` | 1 | 每片段重复次数（取 p99 更优的一轮） |
+| `--repeat` | 1 | 每片段重复次数（取 p99 更优的一轮；各轮 CSV 分别存为 `.r<N>.frames.csv`） |
 | `--warmup` | 0 | 先把片段跑 N 次不计入统计（预热系统缓存） |
 | `--skip-first-frames` | **1** | **只在统计口径上**排除开头 N 个帧（排除含解码器初始化开销的第 0 帧）；帧照常解码与写 CSV，填 `0` 关闭 |
 | `--tick-ms` | 33 | tick 周期 |
@@ -110,13 +110,35 @@ t1   = perf_counter_ns()
 
 ```
 results/<run_id>/
-├─ inventory.json                       片段元数据
-├─ <clip>__<hwaccel>.frames.csv         逐帧
-├─ <clip>__<hwaccel>.ticks.csv          每 33 ms 一行
-├─ <clip>__<hwaccel>.summary.json       总数/均值/中位/p95/p99/max/标准差/抖动/吞吐/实时倍率/硬解/回读/后端
-├─ summary.json                         全部片段汇总 + 环境信息
-└─ summary.md                           便于贴进 issue 的对比表
+├─ inventory.json                         片段元数据
+├─ <clip>__<hwaccel>.r<N>.frames.csv      逐帧（每轮一份）
+├─ <clip>__<hwaccel>.r<N>.ticks.csv       每 33 ms 一行（每轮一份）
+├─ <clip>__<hwaccel>.summary.json         总数/均值/中位/p95/p99/max/标准差/抖动/吞吐/实时倍率/硬解/回读/后端
+├─ summary.json                           全部片段汇总 + 环境信息
+└─ summary.md                             便于贴进 issue 的对比表
 ```
+
+**CSV 按轮次分开命名**（`r1`、`r2`、…，含 `--warmup` 的预热轮）。这样
+`<clip>.summary.json` 里的 `round.frames_csv` / `round.ticks_csv`
+一定指向它**自己那一轮**的文件：
+
+```jsonc
+"round": {
+  "file_tag": "r4", "number": 4, "index": 3, "is_warmup": false,
+  "total_runs": 4, "warmup_runs": 2, "counted_runs": 2,
+  "frames_csv": "AV1_126.99Mbps__videotoolbox.r4.frames.csv",
+  "ticks_csv":  "AV1_126.99Mbps__videotoolbox.r4.ticks.csv",
+  "selected": true,
+  "selection_policy": "lowest-p99-among-counted-runs"
+}
+```
+
+同一份 summary 里还有 `rounds[]`，列出所有**计入统计**的轮次及其
+`mean_ms` / `p99_ms` / `max_ms`，并标出哪一轮被选中 —— 轮间差异因此是可查数据。
+
+> 早先所有轮共用 `<clip>__<hwaccel>.frames.csv` 一个文件名（每轮覆盖），
+> 而 summary 报告的是「计入轮中 p99 更优的一轮」，两者经常不是同一轮。
+> 按轮命名后这个错配从根上消失了。
 
 ---
 

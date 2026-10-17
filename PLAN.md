@@ -213,8 +213,8 @@ t1   = perf_counter_ns()
 `results/<run_id>/`
 
 - `inventory.json` — 片段元数据
-- `<clip>__<hwaccel>.frames.csv` — 逐帧
-- `<clip>__<hwaccel>.ticks.csv` — 每 33ms 一行
+- `<clip>__<hwaccel>.r<N>.frames.csv` — 逐帧（每轮一份，N 含预热轮）
+- `<clip>__<hwaccel>.r<N>.ticks.csv` — 每 33ms 一行（每轮一份）
 - `<clip>__<hwaccel>.summary.json` — 总数/均值/中位/p95/p99/max/标准差/抖动/吞吐 fps/实时倍率/
   hw 像素格式/是否回读/环境信息
 - `summary.json` — 全部片段汇总 + 实际使用的 hwaccel 与设备/环境信息

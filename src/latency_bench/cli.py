@@ -15,7 +15,7 @@ from typing import Any, Sequence
 from . import __version__, accel, bench
 from .accel import AccelError
 from .inventory import inventory_clip, write_inventory
-from .reporting import RunWriter, render_failure
+from .reporting import RoundContext, RunWriter, render_failure
 from .sysinfo import collect_system_info
 
 __all__ = ["build_parser", "main", "run"]
@@ -132,6 +132,17 @@ def _fmt(value: Any, digits: int = 2) -> str:
     return str(value)
 
 
+def _round_label(summary: dict[str, Any]) -> str:
+    """控制台行尾的轮次提示：多轮时标出选中轮，单轮不占地方。"""
+    rnd = summary.get("round") or {}
+    tag = rnd.get("file_tag")
+    if not tag:
+        return ""
+    if (rnd.get("total_runs") or 1) <= 1:
+        return ""
+    return f"[round {tag} selected]"
+
+
 def _print_clip_line(summary: dict[str, Any]) -> None:
     dec = summary.get("decode", {})
     src = summary.get("source", {})
@@ -139,7 +150,7 @@ def _print_clip_line(summary: dict[str, Any]) -> None:
     print(
         "  {name:<24} {w}x{h} {codec:<10} hw={hw:<12} dec={decoder:<15} "
         "frames={frames:<5} mean={mean:>8}ms p95={p95:>8}ms p99={p99:>8}ms "
-        "jitter={jit:>8}ms rt={rt:>6}x hw_ok={hw_ok} readback={rb}".format(
+        "jitter={jit:>8}ms rt={rt:>6}x hw_ok={hw_ok} readback={rb} {rnd}".format(
             name=str(summary.get("clip"))[:24],
             w=src.get("width"),
             h=src.get("height"),
@@ -154,6 +165,7 @@ def _print_clip_line(summary: dict[str, Any]) -> None:
             rt=_fmt(summary.get("realtime_factor"), 2),
             hw_ok="yes" if flags.get("hardware_decode_confirmed") else "NO",
             rb="YES" if flags.get("readback_detected") else "no",
+            rnd=_round_label(summary),
         )
     )
     backend = summary.get("backend") or {}
@@ -180,6 +192,37 @@ def _better(a: dict[str, Any] | None, b: dict[str, Any] | None) -> dict[str, Any
     a_p99 = a.get("decode", {}).get("p99_ms") or float("inf")
     b_p99 = b.get("decode", {}).get("p99_ms") or float("inf")
     return b if b_p99 < a_p99 else a
+
+
+def _record_round_selection(
+    best: dict[str, Any], counted: list[tuple[int, dict[str, Any]]]
+) -> None:
+    """在选中的那轮 summary 里写清「选了第几轮」，并附上各轮的对比。
+
+    这样汇总表、``<clip>.summary.json`` 与磁盘上的 ``.r*.frames.csv`` 三者能对上，
+    也顺便让「轮间差异有多大」变成可查的数据而不是丢失的信息。
+    """
+    rnd = best.get("round")
+    if not isinstance(rnd, dict):
+        return
+    best_tag = rnd.get("file_tag")
+    rnd["selected"] = True
+    rnd["selection_policy"] = "lowest-p99-among-counted-runs"
+    best["rounds"] = [
+        {
+            "file_tag": (s.get("round") or {}).get("file_tag"),
+            "index": index,
+            "number": index + 1,
+            "frames_csv": (s.get("round") or {}).get("frames_csv"),
+            "ticks_csv": (s.get("round") or {}).get("ticks_csv"),
+            "frame_count": s.get("frame_count"),
+            "mean_ms": (s.get("decode") or {}).get("mean_ms"),
+            "p99_ms": (s.get("decode") or {}).get("p99_ms"),
+            "max_ms": (s.get("decode") or {}).get("max_ms"),
+            "selected": (s.get("round") or {}).get("file_tag") == best_tag,
+        }
+        for index, s in counted
+    ]
 
 
 def _configure_console() -> None:
@@ -262,9 +305,15 @@ def run(argv: Sequence[str] | None = None) -> int:
 
         attempts_all = []
         best: dict[str, Any] | None = None
+        counted: list[tuple[int, dict[str, Any]]] = []
         runs = args.warmup + args.repeat
         for round_index in range(runs):
-            is_warmup = round_index < args.warmup
+            ctx = RoundContext(
+                index=round_index,
+                total=runs,
+                warmup=args.warmup,
+                counted=args.repeat,
+            )
             result = bench.run_clip(
                 str(info.path),
                 hwaccel=hwaccel,
@@ -278,13 +327,17 @@ def run(argv: Sequence[str] | None = None) -> int:
                 max_wall_s=args.max_wall_seconds,
                 thread_count=args.thread_count,
                 skip_first_frames=args.skip_first_frames,
+                round_ctx=ctx,
             )
             attempts_all.extend(result.attempts)
             if result.error or result.summary is None:
                 continue
-            if is_warmup:
+            if ctx.is_warmup:
                 continue
+            counted.append((round_index, result.summary))
             best = _better(best, result.summary)
+        if best is not None:
+            _record_round_selection(best, counted)
 
         if best is None:
             # 探测失败：给出可读报错，并写一份 error summary 供汇总表引用。

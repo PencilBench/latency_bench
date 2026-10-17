@@ -29,6 +29,7 @@ from . import accel, ffmpeg_ctypes, stats
 from .accel import AccelError, DecodePlan, PlanAttempt
 from .reporting import (
     FrameSample,
+    RoundContext,
     SampleSink,
     TickRow,
     Ticker,
@@ -441,6 +442,7 @@ def run_clip(
     thread_count: int = 1,
     skip_first_frames: int = 1,
     on_tick: Any = None,
+    round_ctx: RoundContext | None = None,
 ) -> ClipRunResult:
     """完整跑一个片段：探测 → 解码计时 → 33 ms tick → 写 CSV/JSON。
 
@@ -449,7 +451,12 @@ def run_clip(
         只是这些帧不参与均值/分位数/抖动/实时倍率。第 0 帧带着解码器初始化
         开销（实测 18~26 ms，稳态均值只有 1~6 ms），留在统计里会把 p99/max
         显著抬高。
+    :param round_ctx: :class:`reporting.RoundContext`，标记这是第几轮。CSV 文件名带
+        ``.r<N>`` 轮次中缀，summary 里也会记下本轮的 CSV 文件名，避免
+        「summary 与 frames.csv 不是同一轮」。默认按单轮处理。
     """
+    if round_ctx is None:
+        round_ctx = RoundContext()
     outcome = probe_plan(
         path,
         hwaccel=hwaccel,
@@ -469,8 +476,8 @@ def run_clip(
     expected_frames = max_frames if max_frames is not None else expected_frame_count(clip)
     wall_guard = False
 
-    frame_fh, frame_writer = out_dir.clip_frame_writer(clip_stem, plan.hwaccel)
-    tick_fh, tick_writer = out_dir.clip_tick_writer(clip_stem, plan.hwaccel)
+    frame_fh, frame_writer = out_dir.clip_frame_writer(clip_stem, plan.hwaccel, round_ctx)
+    tick_fh, tick_writer = out_dir.clip_tick_writer(clip_stem, plan.hwaccel, round_ctx)
 
     sink = SampleSink(tick_ms / 1e3)
     tick_rows: list[TickRow] = []
@@ -671,6 +678,10 @@ def run_clip(
         expected_frames=expected_frames,
         backend=backend_info,
         skip_first_frames=skip_first_frames,
+        round_info=round_ctx.metadata(
+            frames_csv=out_dir.clip_frames_path(clip_stem, plan.hwaccel, round_ctx).name,
+            ticks_csv=out_dir.clip_ticks_path(clip_stem, plan.hwaccel, round_ctx).name,
+        ),
     )
     summary["sample_trimmed"] = sink.trimmed
     return ClipRunResult(
