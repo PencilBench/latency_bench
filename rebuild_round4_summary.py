@@ -227,9 +227,10 @@ def main() -> int:
             ok_all &= ok
             print("  " + line)
             rebased = rebased or not (orig.get("round") or {}).get("file_tag")
-            # ticks 自检：期望 tick 数应等于实际 tick 数
+            # ticks 自检：期望 tick 数≈实际 tick 数。ticker 是在两次 tick 之间被停止的，
+            # 因此 ±1 属于边界效应（工具自己的输出也会出现），不算不一致。
             t = new["ticks"]
-            if t["expected_count"] != t["count"]:
+            if abs(t["expected_count"] - t["count"]) > 1:
                 print(f"      ⚠ tick 自检不符：expected={t['expected_count']} actual={t['count']}")
                 ok_all = False
         if not rebased:
