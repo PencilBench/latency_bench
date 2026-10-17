@@ -21,8 +21,32 @@ from PIL import Image, ImageDraw, ImageFont
 
 CJK = "/System/Library/Fonts/Hiragino Sans GB.ttc"
 
-#: A / B 两侧的配色（蓝 / 橙）。
-COLORS = {"a": (37, 99, 235), "b": (234, 88, 12)}
+#: 可用的命名配色（也可直接给 ``#RRGGBB``）。
+PALETTE = {
+    "blue": (37, 99, 235),
+    "orange": (234, 88, 12),
+    "green": (22, 163, 74),
+    "red": (220, 38, 38),
+    "purple": (147, 51, 234),
+    "teal": (13, 148, 136),
+    "gray": (100, 116, 139),
+}
+
+#: A / B 两侧的配色，由 ``--color-a`` / ``--color-b`` 决定（默认蓝 / 橙）。
+COLORS = {"a": PALETTE["blue"], "b": PALETTE["orange"]}
+
+
+def parse_color(spec: str) -> tuple[int, int, int]:
+    key = spec.strip().lower()
+    if key in PALETTE:
+        return PALETTE[key]
+    hexed = key.lstrip("#")
+    if len(hexed) == 6:
+        try:
+            return tuple(int(hexed[i:i + 2], 16) for i in (0, 2, 4))  # type: ignore[return-value]
+        except ValueError:
+            pass
+    raise SystemExit(f"无法解析颜色 {spec!r}；可用：{', '.join(PALETTE)}，或 #RRGGBB")
 
 S = 2
 W, H = 1240, 950
@@ -81,6 +105,10 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--label-a", default=None, help="A 侧显示名（默认取 run_id）")
     p.add_argument("--label-b", default=None, help="B 侧显示名（默认取 run_id）")
     p.add_argument("-o", "--out", required=True, type=Path, help="输出 PNG 路径")
+    p.add_argument("--color-a", default="blue",
+                   help=f"A 侧颜色，默认 blue；可用：{', '.join(PALETTE)}，或 #RRGGBB")
+    p.add_argument("--color-b", default="orange",
+                   help=f"B 侧颜色，默认 orange；可用：{', '.join(PALETTE)}，或 #RRGGBB")
     return p
 
 
@@ -100,6 +128,8 @@ def _env_label(payload: dict, clips: dict) -> str:
 
 def main() -> None:
     args = build_parser().parse_args()
+    COLORS["a"] = parse_color(args.color_a)
+    COLORS["b"] = parse_color(args.color_b)
     raw = {k: json.loads(p.read_text(encoding="utf-8")) for k, p in (("a", args.a), ("b", args.b))}
     D = {k: {c["clip"]: c for c in v["clips"]} for k, v in raw.items()}
 
