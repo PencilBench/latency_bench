@@ -153,14 +153,23 @@ results/<run_id>/
 python analyze_compare.py --a results/<runA> --b results/<runB> \
     --label-a "Apple M6" --label-b "Intel Arc B390"
 
-# 对比图（PNG）
-python make_chart.py --a results/<runA>/summary.json --b results/<runB>/summary.json \
-    --label-a "Apple M6" --label-b "Intel Arc B390" -o compare.png
+# 对比图（PNG）。--run 可重复 2 个以上，第一个是基线
+python make_chart.py \
+    --run "Apple M6=results/<runA>/summary.json" \
+    --run "Intel Arc B390=results/<runB>/summary.json" \
+    --run "RTX 5090=/results/<runC>/summary.json" \
+    --colors orange,blue,green -o compare.png
 
 # 按 CSV 重算 summary（修正旧目录的口径，或校验新目录的 CSV 与汇总同轮）
 python rebuild_round4_summary.py --check --run results/<runA> --run results/<runB>
 python rebuild_round4_summary.py --write --run results/<runA>   # 写盘前先备份
 ```
+
+`make_chart.py` 里每个平台一行；当某行的 `p50` 远小于均值
+（`p50 < 0.2 ms` 且 `mean > 5×p50`）时，说明该片段的每包计时被**解码器异步返回**
+主导——绝大多数 `send_packet` 立即返回、真正的开销只落在少数包上，此时
+`p50`/`p99` 反映的是轮询节奏而非帧延迟，图上标 `*` 并在图例说明。
+**这种行的均值仍然有效**（总耗时守恒），但分位数不可比。
 
 `rebuild_round4_summary.py` 复用工具自己的 `FrameSample` / `summarize_ticks` /
 `build_clip_summary` / `render_markdown`，所以重算口径与工具逐位一致：
@@ -197,6 +206,13 @@ python rebuild_round4_summary.py --write --run results/<runA>   # 写盘前先�
 | H265 1080p 28 Mbps | `hevc` + d3d11va | 595 | 0.779 | 0.083 | 0.291 | 25.389 | 21.83 |
 
 **这不是 Xe3 的数据** —— 本机是 NVIDIA 独显 + AMD CPU，只用于验证管线。
+
+> ⚠️ 表中两个 1080p 片段的 **`p50` 与 `p99` 不能当性能特征读**（例如 AV1 1080p 的
+> `p50 = 0.090 ms` 却 `p99 = 14.385 ms`）。这是解码器**异步返回**造成的采样图案：
+> 约 90% 的包在 0.06 ms 内返回、真正的解码开销只在少数包上体现，于是分位数描述的是
+> 轮询节奏而不是帧延迟。**该行的均值可用，分位数不可比。**
+> 判据：`p50 < 0.2 ms` 且 `mean > 5 × p50`。RTX 5090 上只有 1080p 片段命中，
+> 4K 片段与 Xe3 / Apple 平台都不受影响。
 
 ---
 
